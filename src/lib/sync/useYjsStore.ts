@@ -15,7 +15,7 @@ import type {
 } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import * as Y from "yjs";
-import type { Transaction, YEvent } from "yjs";
+import type { Transaction } from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import type { YjsSceneFileEntry } from "@/lib/excalidraw/board-scene-files";
 
@@ -29,7 +29,6 @@ export interface YjsSyncState {
 
 type UseYjsOptions = {
   userName?: string;
-  /** When false, no WebSocket connection (use until board load confirms access). */
   enabled?: boolean;
 };
 
@@ -111,24 +110,22 @@ export function useYjsStore(
   const enabled = options?.enabled ?? true;
 
   const [state, setState] = useState<YjsSyncState | null>(null);
-  const suppressRemoteRef = useRef(false);
-  const applyingSceneFilesRef = useRef(false);
-  /** Set synchronously in layout effect so pushes work before React state commits. */
   const docRef = useRef<Y.Doc | null>(null);
   const providerRef = useRef<WebsocketProvider | null>(null);
-  /** Latest Excalidraw API inside layout-effect observers (avoids stale closures). */
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
-  /** Outbound push deferred while remote apply runs (see tryFlushPendingOutboundRef). */
-  const pendingOutboundElementsRef = useRef<readonly ExcalidrawElement[] | null>(
-    null
-  );
-  const tryFlushPendingOutboundRef = useRef<() => void>(() => {});
+  /**
+   * True while we are applying remote Y data into Excalidraw via updateScene/addFiles.
+   * While true, onElementsChange DROPS calls — the elements came from our own
+   * updateScene and must NOT be echoed back into Yjs (that creates a ping-pong loop).
+   */
+  const applyingRemoteRef = useRef(false);
+  const applyingSceneFilesRef = useRef(false);
 
   const pushCollaborators = useCallback(
     (provider: WebsocketProvider | null, excalidrawApi: ExcalidrawImperativeAPI) => {
       if (!provider) return;
       const collaborators = awarenessToCollaborators(provider.awareness);
-      suppressRemoteRef.current = true;
+      applyingRemoteRef.current = true;
       try {
         excalidrawApi.updateScene({
           appState: { collaborators },
@@ -137,7 +134,7 @@ export function useYjsStore(
       } catch {
         /* ignore */
       }
-      suppressRemoteRef.current = false;
+      applyingRemoteRef.current = false;
     },
     []
   );
@@ -158,26 +155,27 @@ export function useYjsStore(
         (x): x is BinaryFilePayload => x != null
       );
       if (resolved.length) {
-        suppressRemoteRef.current = true;
+        applyingRemoteRef.current = true;
         try {
           excalidrawApi.addFiles(resolved);
         } catch {
           /* ignore */
         }
-        suppressRemoteRef.current = false;
+        applyingRemoteRef.current = false;
       }
       applyingSceneFilesRef.current = false;
     },
     []
   );
 
+  /**
+   * Called from Board.tsx onChange for every local edit.
+   * MUST NOT run when we are applying remote data (applyingRemoteRef),
+   * otherwise we echo the remote elements back into Yjs → infinite loop.
+   */
   const onElementsChange = useCallback(
     (elements: readonly ExcalidrawElement[]) => {
-      if (suppressRemoteRef.current) {
-        pendingOutboundElementsRef.current = elements;
-        queueMicrotask(() => tryFlushPendingOutboundRef.current());
-        return;
-      }
+      if (applyingRemoteRef.current) return;
       const doc = docRef.current;
       if (!doc) return;
       const yEls = doc.getArray<Y.Map<unknown>>("elements");
@@ -199,7 +197,7 @@ export function useYjsStore(
     (patch: Record<string, YjsSceneFileEntry>) => {
       const doc = docRef.current;
       if (
-        suppressRemoteRef.current ||
+        applyingRemoteRef.current ||
         !doc ||
         applyingSceneFilesRef.current
       ) {
@@ -225,7 +223,7 @@ export function useYjsStore(
       button: "down" | "up";
     }) => {
       const provider = providerRef.current;
-      if (!provider || suppressRemoteRef.current) return;
+      if (!provider || applyingRemoteRef.current) return;
       provider.awareness.setLocalStateField("pointer", {
         x: payload.pointer.x,
         y: payload.pointer.y,
@@ -244,9 +242,6 @@ export function useYjsStore(
     if (!enabled) {
       docRef.current = null;
       providerRef.current = null;
-      pendingOutboundElementsRef.current = null;
-      tryFlushPendingOutboundRef.current = () => {};
-      // Collab disabled: clear WS state when navigating away or before canvas is ready.
       queueMicrotask(() => setState(null));
       return;
     }
@@ -270,30 +265,11 @@ export function useYjsStore(
     const yElements = doc.getArray<Y.Map<unknown>>("elements");
     const ySceneFiles = doc.getMap<unknown>("sceneFiles");
 
-    tryFlushPendingOutboundRef.current = () => {
-      const els = pendingOutboundElementsRef.current;
-      const d = docRef.current;
-      if (!els || !d) return;
-      if (suppressRemoteRef.current) {
-        queueMicrotask(() => tryFlushPendingOutboundRef.current());
-        return;
-      }
-      pendingOutboundElementsRef.current = null;
-      const yEls = d.getArray<Y.Map<unknown>>("elements");
-      d.transact(() => {
-        yEls.delete(0, yEls.length);
-        for (const el of els) {
-          const yEl = new Y.Map<unknown>();
-          for (const [k, v] of Object.entries(el)) {
-            yEl.set(k, v);
-          }
-          yEls.push([yEl]);
-        }
-      });
-    };
-
-    const flushElementsFromRemoteY = (transaction: Transaction) => {
-      if (transaction.local) return;
+    /**
+     * Apply remote Y elements into Excalidraw.
+     * Only called when we know the update came from the WebSocket provider.
+     */
+    const flushRemoteElements = () => {
       const drawApi = apiRef.current;
       if (!drawApi) return;
       if (yElements.length === 0) return;
@@ -301,25 +277,31 @@ export function useYjsStore(
       yElements.forEach((yEl) => {
         if (yEl) elements.push(yEl.toJSON() as ExcalidrawElement);
       });
-      suppressRemoteRef.current = true;
+      applyingRemoteRef.current = true;
       try {
         drawApi.updateScene({
           elements,
           captureUpdate: CaptureUpdateAction.NEVER,
         });
       } catch {
-        /* sync races on init */
+        /* race on init */
       }
-      suppressRemoteRef.current = false;
+      applyingRemoteRef.current = false;
     };
 
-    const onYElementsDeep = (
-      _events: YEvent<Y.AbstractType<unknown>>[],
-      transaction: Transaction
+    /**
+     * doc 'update' fires after each transaction with (update, origin, doc, transaction).
+     * When origin === provider the update came from the WebSocket (remote peer).
+     * This is the only case where we need to push Y state into Excalidraw.
+     */
+    const onDocUpdate = (
+      _update: Uint8Array,
+      origin: unknown,
     ) => {
-      flushElementsFromRemoteY(transaction);
+      if (origin !== provider) return;
+      flushRemoteElements();
     };
-    yElements.observeDeep(onYElementsDeep);
+    doc.on("update", onDocUpdate);
 
     const onYFiles = (_event: unknown, transaction: Transaction) => {
       if (transaction.local) return;
@@ -381,14 +363,12 @@ export function useYjsStore(
     });
 
     return () => {
-      tryFlushPendingOutboundRef.current = () => {};
-      pendingOutboundElementsRef.current = null;
       docRef.current = null;
       providerRef.current = null;
       provider.awareness.off("update", onAwareness);
       provider.off("status", onStatus);
       provider.off("sync", onSync);
-      yElements.unobserveDeep(onYElementsDeep);
+      doc.off("update", onDocUpdate);
       ySceneFiles.unobserve(onYFiles);
       provider.disconnect();
       provider.destroy();
@@ -397,7 +377,6 @@ export function useYjsStore(
     };
   }, [roomId, userName, enabled, applySceneFilesFromY, pushCollaborators]);
 
-  /** When `api` arrives after the room is live, seed empty Y from Excalidraw once. */
   useLayoutEffect(() => {
     if (!enabled || !api) return;
     const doc = docRef.current;
