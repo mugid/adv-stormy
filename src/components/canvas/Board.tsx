@@ -10,15 +10,52 @@ import {
 import "@excalidraw/excalidraw/index.css";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ImportedDataState } from "@excalidraw/excalidraw/data/types";
-import { AgentPanel } from "./AgentPanel";
+import { AgentPanel, type CanvasInputMode, type AgentMessage } from "./AgentPanel";
 import { AgentCursor } from "./AgentCursor";
 import { useCanvasAgent } from "@/lib/agent/use-canvas-agent";
+import { placeRemoteImageOnCanvas } from "@/lib/excalidraw/place-remote-image";
+import {
+  collectReferencedImageFileIds,
+  dataURLToUploadFile,
+  hydrateBoardSceneFiles,
+  type BoardSceneFiles,
+} from "@/lib/excalidraw/board-scene-files";
+import { uploadBoardFileViaImageKit } from "@/lib/imagekit/client-upload";
+import { Button } from "@/components/ui/button";
+import { X } from "lucide-react";
+
+const imageKitConfigured =
+  typeof process.env.NEXT_PUBLIC_IMAGEKIT_PUBLIC_KEY === "string" &&
+  process.env.NEXT_PUBLIC_IMAGEKIT_PUBLIC_KEY.length > 0;
 
 interface BoardProps {
   boardId: string;
 }
 
 const SAVE_DEBOUNCE_MS = 650;
+
+async function pollMediaUntilTerminal(requestId: string) {
+  const intervalMs = 2500;
+  for (;;) {
+    const res = await fetch(
+      `/api/media/higgsfield/status?requestId=${encodeURIComponent(requestId)}`
+    );
+    const data = (await res.json()) as {
+      terminal?: boolean;
+      status?: string;
+      error?: string;
+      images?: Array<{ url: string }>;
+      video?: { url: string };
+    };
+    if (!res.ok) {
+      throw new Error((data as { error?: string }).error ?? "Status request failed");
+    }
+    if (data.terminal) {
+      return data;
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
 
 export function Board({ boardId }: BoardProps) {
   const [api, setApi] = useState<ExcalidrawImperativeAPI | null>(null);
@@ -29,7 +66,40 @@ export function Board({ boardId }: BoardProps) {
   >({ status: "loading" });
   const persistOkRef = useRef(false);
   const saveTimerRef = useRef<number | null>(null);
+  const serverSceneFilesRef = useRef<BoardSceneFiles>({});
+  const uploadCacheRef = useRef(
+    new Map<string, { dataURL: string; url: string }>(),
+  );
+  const lastPersistedAgentVideoRef = useRef<string | null>(null);
   const agent = useCanvasAgent(api);
+
+  const persistPinnedVideo = useCallback(async (url: string | null) => {
+    try {
+      await fetch(`/api/boards/${boardId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pinnedVideoUrl: url }),
+      });
+    } catch (e) {
+      console.error("Failed to save pinned video", e);
+    }
+  }, [boardId]);
+
+  const [inputMode, setInputMode] = useState<CanvasInputMode>("brainstorm");
+  const [mediaLog, setMediaLog] = useState<AgentMessage[]>([]);
+  const [isMediaBusy, setIsMediaBusy] = useState(false);
+  const [mediaHint, setMediaHint] = useState("");
+  const [localVideoUrl, setLocalVideoUrl] = useState<string | null>(null);
+
+  const panelMessages = inputMode === "brainstorm" ? agent.messages : mediaLog;
+  const videoUrl = localVideoUrl ?? agent.generatedVideoUrl;
+
+  const clearVideo = useCallback(() => {
+    setLocalVideoUrl(null);
+    lastPersistedAgentVideoRef.current = null;
+    agent.clearGeneratedVideo();
+    void persistPinnedVideo(null);
+  }, [agent, persistPinnedVideo]);
 
   useEffect(() => {
     let cancelled = false;
@@ -37,6 +107,7 @@ export function Board({ boardId }: BoardProps) {
     setBoot({ status: "loading" });
 
     async function load() {
+      lastPersistedAgentVideoRef.current = null;
       const res = await fetch(`/api/boards/${boardId}`);
       if (cancelled) return;
       if (res.status === 401) {
@@ -51,18 +122,47 @@ export function Board({ boardId }: BoardProps) {
         return;
       }
 
-      const data: { sceneJson?: string | null } = await res.json();
+      const data: {
+        sceneJson?: string | null;
+        sceneFiles?: BoardSceneFiles | null;
+        pinnedVideoUrl?: string | null;
+      } = await res.json();
       if (cancelled) return;
+
+      serverSceneFilesRef.current = data.sceneFiles ?? {};
+      uploadCacheRef.current.clear();
+      setLocalVideoUrl(data.pinnedVideoUrl ?? null);
 
       let initial: ReturnType<typeof restore>;
       if (data.sceneJson && data.sceneJson.length > 0) {
         try {
           const parsed = JSON.parse(data.sceneJson) as ImportedDataState;
+          const elements = parsed.elements ?? [];
+          const embedded = parsed.files ?? {};
+          const referenced = collectReferencedImageFileIds(elements);
+          let files = embedded;
+          if (!embedded || Object.keys(embedded).length === 0) {
+            files = await hydrateBoardSceneFiles(
+              referenced,
+              data.sceneFiles ?? undefined,
+            );
+          }
+          for (const id of referenced) {
+            const f = files[id];
+            const url = data.sceneFiles?.[id]?.url;
+            if (f?.dataURL && url) {
+              uploadCacheRef.current.set(id, {
+                dataURL: f.dataURL as string,
+                url,
+              });
+            }
+          }
+
           initial = restore(
             {
-              elements: parsed.elements ?? [],
+              elements,
               appState: parsed.appState,
-              files: parsed.files,
+              files,
             },
             null,
             null,
@@ -82,6 +182,14 @@ export function Board({ boardId }: BoardProps) {
       cancelled = true;
     };
   }, [boardId]);
+
+  useEffect(() => {
+    const u = agent.generatedVideoUrl;
+    if (!u || u === lastPersistedAgentVideoRef.current) return;
+    lastPersistedAgentVideoRef.current = u;
+    setLocalVideoUrl(u);
+    void persistPinnedVideo(u);
+  }, [agent.generatedVideoUrl, persistPinnedVideo]);
 
   useEffect(() => {
     if (boot.status !== "ready" || !api) return;
@@ -108,12 +216,76 @@ export function Board({ boardId }: BoardProps) {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = window.setTimeout(() => {
         saveTimerRef.current = null;
-        const sceneJson = serializeAsJSON(elements, appState, files, "database");
-        void fetch(`/api/boards/${boardId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sceneJson }),
-        }).catch((err) => console.error("Failed to save board", err));
+        void (async () => {
+          try {
+            if (!imageKitConfigured) {
+              const sceneJson = serializeAsJSON(
+                elements,
+                appState,
+                files,
+                "local",
+              );
+              await fetch(`/api/boards/${boardId}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ sceneJson }),
+              });
+              return;
+            }
+
+            const sceneJson = serializeAsJSON(
+              elements,
+              appState,
+              files,
+              "database",
+            );
+            const referenced = collectReferencedImageFileIds(elements);
+            const nextSceneFiles: BoardSceneFiles = {};
+
+            for (const id of referenced) {
+              const local = files[id];
+              if (local) {
+                const d = local.dataURL as string;
+                const cached = uploadCacheRef.current.get(id);
+                if (cached?.dataURL === d && cached.url) {
+                  nextSceneFiles[id] = {
+                    url: cached.url,
+                    mimeType: local.mimeType,
+                  };
+                } else {
+                  try {
+                    const uploadFile = dataURLToUploadFile(
+                      d,
+                      local.mimeType,
+                      id,
+                    );
+                    const { url } = await uploadBoardFileViaImageKit(
+                      boardId,
+                      id,
+                      uploadFile,
+                    );
+                    uploadCacheRef.current.set(id, { dataURL: d, url });
+                    nextSceneFiles[id] = { url, mimeType: local.mimeType };
+                  } catch {
+                    const fallback = serverSceneFilesRef.current[id];
+                    if (fallback) nextSceneFiles[id] = fallback;
+                  }
+                }
+              } else if (serverSceneFilesRef.current[id]) {
+                nextSceneFiles[id] = serverSceneFilesRef.current[id]!;
+              }
+            }
+
+            await fetch(`/api/boards/${boardId}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ sceneJson, sceneFiles: nextSceneFiles }),
+            });
+            serverSceneFilesRef.current = nextSceneFiles;
+          } catch (err) {
+            console.error("Failed to save board", err);
+          }
+        })();
       }, SAVE_DEBOUNCE_MS);
     },
     [boardId],
@@ -128,6 +300,157 @@ export function Board({ boardId }: BoardProps) {
       scheduleSave(elements, appState, files);
     },
     [scheduleSave],
+  );
+
+  const handleImageSubmit = useCallback(
+    async (payload: {
+      prompt: string;
+      aspectRatio?: string;
+      resolution?: string;
+    }) => {
+      if (!api) return;
+      setIsMediaBusy(true);
+      setMediaHint("queued");
+      setMediaLog((prev) => [
+        ...prev,
+        { role: "user", content: payload.prompt, timestamp: Date.now() },
+      ]);
+      try {
+        const startRes = await fetch("/api/media/higgsfield/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kind: "image",
+            boardId,
+            prompt: payload.prompt,
+            aspect_ratio: payload.aspectRatio,
+            resolution: payload.resolution,
+          }),
+        });
+        const startJson = (await startRes.json()) as {
+          error?: string;
+          requestId?: string;
+        };
+        if (!startRes.ok) {
+          throw new Error(startJson.error ?? "Failed to start generation");
+        }
+        const requestId = startJson.requestId!;
+        setMediaHint("generating");
+        const result = await pollMediaUntilTerminal(requestId);
+        if (result.status === "completed" && result.images?.[0]?.url) {
+          await placeRemoteImageOnCanvas(api, result.images[0].url);
+          setMediaLog((prev) => [
+            ...prev,
+            {
+              role: "agent",
+              content: "Image added to the canvas.",
+              timestamp: Date.now(),
+            },
+          ]);
+        } else if (result.status === "nsfw") {
+          setMediaLog((prev) => [
+            ...prev,
+            {
+              role: "agent",
+              content: "Generation was blocked (nsfw).",
+              timestamp: Date.now(),
+            },
+          ]);
+        } else {
+          throw new Error(result.error ?? `Status: ${result.status}`);
+        }
+      } catch (e) {
+        setMediaLog((prev) => [
+          ...prev,
+          {
+            role: "agent",
+            content: e instanceof Error ? e.message : "Generation failed",
+            timestamp: Date.now(),
+          },
+        ]);
+      } finally {
+        setIsMediaBusy(false);
+        setMediaHint("");
+      }
+    },
+    [api, boardId],
+  );
+
+  const handleVideoSubmit = useCallback(
+    async (payload: { imageUrl: string; prompt: string; duration?: number }) => {
+      if (!api) return;
+      setIsMediaBusy(true);
+      setMediaHint("queued");
+      setMediaLog((prev) => [
+        ...prev,
+        {
+          role: "user",
+          content: `${payload.prompt}\n(${payload.imageUrl})`,
+          timestamp: Date.now(),
+        },
+      ]);
+      try {
+        const startRes = await fetch("/api/media/higgsfield/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kind: "video",
+            boardId,
+            image_url: payload.imageUrl,
+            prompt: payload.prompt,
+            duration: payload.duration,
+          }),
+        });
+        const startJson = (await startRes.json()) as {
+          error?: string;
+          requestId?: string;
+        };
+        if (!startRes.ok) {
+          throw new Error(startJson.error ?? "Failed to start video");
+        }
+        const requestId = startJson.requestId!;
+        setMediaHint("generating");
+        const result = await pollMediaUntilTerminal(requestId);
+        if (result.status === "completed" && result.video?.url) {
+          const vUrl = result.video.url;
+          setLocalVideoUrl(vUrl);
+          lastPersistedAgentVideoRef.current = vUrl;
+          void persistPinnedVideo(vUrl);
+          setMediaLog((prev) => [
+            ...prev,
+            {
+              role: "agent",
+              content: "Video ready — see player above the canvas.",
+              timestamp: Date.now(),
+            },
+          ]);
+        } else if (result.status === "nsfw") {
+          setMediaLog((prev) => [
+            ...prev,
+            {
+              role: "agent",
+              content: "Video generation was blocked (nsfw).",
+              timestamp: Date.now(),
+            },
+          ]);
+        } else {
+          throw new Error(result.error ?? `Status: ${result.status}`);
+        }
+      } catch (e) {
+        setMediaLog((prev) => [
+          ...prev,
+          {
+            role: "agent",
+            content: e instanceof Error ? e.message : "Video generation failed",
+            timestamp: Date.now(),
+          },
+        ]);
+      } finally {
+        setIsMediaBusy(false);
+        setMediaHint("");
+      }
+    },
+    [api, boardId, persistPinnedVideo],
   );
 
   const [cursorVp, setCursorVp] = useState({ x: 0, y: 0 });
@@ -147,7 +470,7 @@ export function Board({ boardId }: BoardProps) {
         offsetTop: app.offsetTop,
         scrollX: app.scrollX,
         scrollY: app.scrollY,
-      }
+      },
     );
     setCursorVp(v);
   }, [api, agent.agentCursorScene]);
@@ -199,6 +522,24 @@ export function Board({ boardId }: BoardProps) {
 
   return (
     <div className="relative h-full min-h-0 w-full bg-background">
+      {videoUrl && (
+        <div className="absolute right-4 top-4 z-50 w-full max-w-md rounded-lg border border-border bg-background/95 p-3 shadow-lg backdrop-blur-sm">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="text-xs font-medium text-muted-foreground">
+              Generated video
+            </span>
+            <Button type="button" variant="ghost" size="icon-sm" onClick={clearVideo}>
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+          <video
+            src={videoUrl}
+            controls
+            className="w-full rounded-md"
+            playsInline
+          />
+        </div>
+      )}
       <div className="absolute inset-0 z-0 [&_.excalidraw]:h-full [&_.excalidraw]:max-h-none">
         <Excalidraw
           key={boardId}
@@ -216,10 +557,16 @@ export function Board({ boardId }: BoardProps) {
             label="Stormy AI"
           />
           <AgentPanel
-            onSubmit={agent.prompt}
-            messages={agent.messages}
-            isThinking={agent.isThinking}
-            onCancel={agent.cancel}
+            mode={inputMode}
+            onModeChange={setInputMode}
+            onBrainstormSubmit={agent.prompt}
+            onImageSubmit={handleImageSubmit}
+            onVideoSubmit={handleVideoSubmit}
+            messages={panelMessages}
+            isBrainstormBusy={agent.isThinking}
+            onBrainstormCancel={agent.cancel}
+            isMediaBusy={isMediaBusy}
+            mediaHint={mediaHint}
           />
         </>
       )}

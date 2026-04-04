@@ -29,6 +29,10 @@ export const BRAINSTORM_AGENT_SYSTEM_PROMPT = `You are a creative brainstorming 
 - When organizing, arrange in clear rows/columns or radial patterns
 - Place summary/category labels above or to the left of their groups
 
+## Media (Higgsfield)
+- Use generate_image when the user wants an AI image from a text description; the image appears on the canvas automatically.
+- Use generate_video only with a valid public https image_url and a motion/camera prompt. The app will show the video when ready.
+
 ## Communication
 - Use the "message" action to briefly explain what you're doing
 - Keep messages concise — your canvas actions speak louder than words

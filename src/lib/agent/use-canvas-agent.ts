@@ -18,6 +18,7 @@ interface ConversationMessage {
 
 export function useCanvasAgent(api: ExcalidrawImperativeAPI | null) {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
   const [isThinking, setIsThinking] = useState(false);
   const [agentCursorScene, setAgentCursorScene] = useState<{
     x: number;
@@ -82,7 +83,7 @@ export function useCanvasAgent(api: ExcalidrawImperativeAPI | null) {
 
             try {
               const event: AgentStreamEvent = JSON.parse(data);
-              handleEvent(api, event, setMessages, setAgentCursorScene);
+              handleEvent(api, event, setMessages, setAgentCursorScene, setGeneratedVideoUrl);
 
               if (event.type === "message" && event.content) {
                 assistantMessage += event.content + " ";
@@ -129,7 +130,17 @@ export function useCanvasAgent(api: ExcalidrawImperativeAPI | null) {
     setAgentCursorScene(null);
   }, []);
 
-  return { messages, isThinking, prompt, cancel, agentCursorScene };
+  const clearGeneratedVideo = useCallback(() => setGeneratedVideoUrl(null), []);
+
+  return {
+    messages,
+    isThinking,
+    prompt,
+    cancel,
+    agentCursorScene,
+    generatedVideoUrl,
+    clearGeneratedVideo,
+  };
 }
 
 function handleEvent(
@@ -138,7 +149,8 @@ function handleEvent(
   setMessages: React.Dispatch<React.SetStateAction<AgentMessage[]>>,
   setAgentCursorScene: React.Dispatch<
     React.SetStateAction<{ x: number; y: number } | null>
-  >
+  >,
+  setGeneratedVideoUrl: React.Dispatch<React.SetStateAction<string | null>>
 ) {
   switch (event.type) {
     case "message":
@@ -151,6 +163,9 @@ function handleEvent(
       break;
     case "action":
       if (event.action) {
+        if (event.action.type === "show_generated_video") {
+          setGeneratedVideoUrl(event.action.videoUrl);
+        }
         executeAction(api, event.action);
         const p = scenePointForAgentAction(api, event.action);
         if (p) setAgentCursorScene(p);
@@ -183,6 +198,10 @@ function describeAction(action: AgentAction): string | null {
       return `[Grouped shapes]`;
     case "update_shape":
       return `[Updated shape]`;
+    case "place_generated_image":
+      return `[Placed generated image]`;
+    case "show_generated_video":
+      return `[Video ready]`;
     default:
       return null;
   }

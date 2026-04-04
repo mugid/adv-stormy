@@ -1,0 +1,1 @@
+ALTER TABLE "boards" ADD COLUMN "pinned_video_url" text;

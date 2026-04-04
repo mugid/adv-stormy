@@ -4,6 +4,7 @@ import {
   timestamp,
   boolean,
   customType,
+  jsonb,
 } from "drizzle-orm/pg-core";
 import { nanoid } from "nanoid";
 
@@ -71,10 +72,16 @@ export const boards = pgTable("boards", {
   ownerId: text("owner_id")
     .notNull()
     .references(() => user.id, { onDelete: "cascade" }),
-  /** Excalidraw document from `serializeAsJSON(..., "database")` */
+  /** Excalidraw document from `serializeAsJSON(..., "database")` (no embedded binaries) */
   sceneJson: text("scene_json"),
+  /** ImageKit URLs keyed by Excalidraw fileId for canvas images */
+  sceneFiles: jsonb("scene_files").$type<
+    Record<string, { url: string; mimeType: string }> | null
+  >(),
   yDocState: bytea("y_doc_state"),
   thumbnail: text("thumbnail"),
+  /** Last generated / pinned video URL (Higgsfield or agent); shown in board overlay */
+  pinnedVideoUrl: text("pinned_video_url"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
@@ -93,4 +100,25 @@ export const boardMembers = pgTable("board_members", {
     .notNull()
     .default("editor"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+export const mediaGenerationJobs = pgTable("media_generation_jobs", {
+  id: text("id")
+    .primaryKey()
+    .$defaultFn(() => nanoid()),
+  requestId: text("request_id").notNull().unique(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  boardId: text("board_id").references(() => boards.id, { onDelete: "set null" }),
+  status: text("status").notNull().default("queued"),
+  hfStatusUrl: text("hf_status_url"),
+  payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+  resultUrls: jsonb("result_urls").$type<{
+    images?: string[];
+    video?: string;
+  } | null>(),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });

@@ -171,6 +171,52 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: "generate_image",
+    description:
+      "Generate an image from a text prompt using Higgsfield and place it on the canvas. Use when the user asks for a picture, illustration, or visual.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        prompt: {
+          type: "string",
+          description: "Detailed description of the image to generate",
+        },
+        aspect_ratio: {
+          type: "string",
+          description: 'Aspect ratio e.g. "16:9", "9:16", "1:1"',
+        },
+        resolution: {
+          type: "string",
+          description: 'Resolution e.g. "720p", "1080p"',
+        },
+      },
+      required: ["prompt"],
+    },
+  },
+  {
+    name: "generate_video",
+    description:
+      "Generate a short video from a source image URL and motion prompt (Higgsfield image-to-video). Requires a public https image URL.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        image_url: {
+          type: "string",
+          description: "Public https URL of the source image",
+        },
+        prompt: {
+          type: "string",
+          description: "Describe motion, camera, and what should happen",
+        },
+        duration: {
+          type: "number",
+          description: "Duration in seconds if the model supports it",
+        },
+      },
+      required: ["image_url", "prompt"],
+    },
+  },
+  {
     name: "message",
     description:
       "Send a text message to the user explaining what you're doing or asking for clarification. Use sparingly — your canvas actions are the primary communication.",

@@ -7,6 +7,7 @@ import {
 import type { ExcalidrawElementSkeleton } from "@excalidraw/excalidraw/data/transform";
 import { nanoid } from "nanoid";
 import type { AgentAction } from "./types";
+import { placeRemoteImageOnCanvas } from "@/lib/excalidraw/place-remote-image";
 
 export function executeAction(api: ExcalidrawImperativeAPI, action: AgentAction) {
   switch (action.type) {
@@ -22,6 +23,13 @@ export function executeAction(api: ExcalidrawImperativeAPI, action: AgentAction)
       return executeCreateConnection(api, action);
     case "group_shapes":
       return executeGroupShapes(api, action);
+    case "place_generated_image":
+      void placeRemoteImageOnCanvas(api, action.imageUrl).catch((err) =>
+        console.error("place_generated_image failed", err)
+      );
+      return;
+    case "show_generated_video":
+      return;
     default:
       console.warn("Unknown action type:", (action as AgentAction).type);
   }

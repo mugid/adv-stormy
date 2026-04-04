@@ -23,7 +23,9 @@ export type AgentAction =
   | DeleteShapesAction
   | MoveShapesAction
   | CreateConnectionAction
-  | GroupShapesAction;
+  | GroupShapesAction
+  | PlaceGeneratedImageAction
+  | ShowGeneratedVideoAction;
 
 export interface CreateShapeAction {
   type: "create_shape";
@@ -61,6 +63,16 @@ export interface CreateConnectionAction {
 export interface GroupShapesAction {
   type: "group_shapes";
   shapeIds: string[];
+}
+
+export interface PlaceGeneratedImageAction {
+  type: "place_generated_image";
+  imageUrl: string;
+}
+
+export interface ShowGeneratedVideoAction {
+  type: "show_generated_video";
+  videoUrl: string;
 }
 
 export interface AgentStreamEvent {

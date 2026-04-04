@@ -33,6 +33,8 @@ export async function GET(
     id: board.id,
     title: board.title,
     sceneJson: board.sceneJson,
+    sceneFiles: board.sceneFiles,
+    pinnedVideoUrl: board.pinnedVideoUrl,
     updatedAt: board.updatedAt,
   });
 }
@@ -51,10 +53,37 @@ export async function PATCH(
   const sceneJson =
     typeof body.sceneJson === "string" ? body.sceneJson : undefined;
   const title = typeof body.title === "string" ? body.title : undefined;
+  const sceneFiles =
+    body.sceneFiles !== undefined && body.sceneFiles !== null &&
+    typeof body.sceneFiles === "object"
+      ? (body.sceneFiles as Record<string, { url: string; mimeType: string }>)
+      : undefined;
 
-  if (sceneJson === undefined && title === undefined) {
+  let pinnedVideoUrl: string | null | undefined;
+  if ("pinnedVideoUrl" in body) {
+    if (body.pinnedVideoUrl === null) {
+      pinnedVideoUrl = null;
+    } else if (typeof body.pinnedVideoUrl === "string") {
+      pinnedVideoUrl = body.pinnedVideoUrl;
+    } else {
+      return NextResponse.json(
+        { error: "pinnedVideoUrl must be a string or null" },
+        { status: 400 }
+      );
+    }
+  }
+
+  if (
+    sceneJson === undefined &&
+    title === undefined &&
+    sceneFiles === undefined &&
+    pinnedVideoUrl === undefined
+  ) {
     return NextResponse.json(
-      { error: "Provide sceneJson and/or title" },
+      {
+        error:
+          "Provide sceneJson, sceneFiles, pinnedVideoUrl, and/or title",
+      },
       { status: 400 }
     );
   }
@@ -69,6 +98,8 @@ export async function PATCH(
     .update(boards)
     .set({
       ...(sceneJson !== undefined ? { sceneJson } : {}),
+      ...(sceneFiles !== undefined ? { sceneFiles } : {}),
+      ...(pinnedVideoUrl !== undefined ? { pinnedVideoUrl } : {}),
       ...(title !== undefined ? { title } : {}),
       updatedAt: new Date(),
     })

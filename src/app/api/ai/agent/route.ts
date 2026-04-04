@@ -1,7 +1,16 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { NextResponse } from "next/server";
+import { headers } from "next/headers";
+import { auth } from "@/lib/auth";
 import { BRAINSTORM_AGENT_SYSTEM_PROMPT } from "@/lib/agent/system-prompt";
 import { AGENT_TOOLS } from "@/lib/agent/tool-schemas";
 import type { CanvasContext, AgentAction, AgentStreamEvent } from "@/lib/agent/types";
+import {
+  getDefaultImageModel,
+  getDefaultVideoModel,
+  pollUntilTerminal,
+  submitGeneration,
+} from "@/lib/higgsfield/client";
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -14,6 +23,13 @@ interface AgentRequest {
 }
 
 export async function POST(request: Request) {
+  const session = await auth.api.getSession({
+    headers: await headers(),
+  });
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   const body: AgentRequest = await request.json();
   const { message, context, history } = body;
 
@@ -76,8 +92,6 @@ export async function POST(request: Request) {
             if (block.type === "text" && block.text.trim()) {
               send({ type: "message", content: block.text });
             } else if (block.type === "tool_use") {
-              const action = toolCallToAction(block.name, block.input as Record<string, unknown>);
-
               if (block.name === "message") {
                 const text = (block.input as { text: string }).text;
                 send({ type: "message", content: text });
@@ -86,20 +100,135 @@ export async function POST(request: Request) {
                   tool_use_id: block.id,
                   content: "Message sent to user",
                 });
-              } else if (action) {
-                send({ type: "action", action });
-                toolResults.push({
-                  type: "tool_result",
-                  tool_use_id: block.id,
-                  content: `Action ${action.type} executed successfully`,
-                });
+              } else if (block.name === "generate_image") {
+                try {
+                  const input = block.input as {
+                    prompt: string;
+                    aspect_ratio?: string;
+                    resolution?: string;
+                  };
+                  const hfBody: Record<string, unknown> = { prompt: input.prompt };
+                  if (input.aspect_ratio) hfBody.aspect_ratio = input.aspect_ratio;
+                  if (input.resolution) hfBody.resolution = input.resolution;
+                  const submitted = await submitGeneration(
+                    getDefaultImageModel(),
+                    hfBody
+                  );
+                  const result = await pollUntilTerminal(submitted.request_id);
+                  if (result.status === "completed" && result.images?.[0]?.url) {
+                    send({
+                      type: "action",
+                      action: {
+                        type: "place_generated_image",
+                        imageUrl: result.images[0].url,
+                      },
+                    });
+                    toolResults.push({
+                      type: "tool_result",
+                      tool_use_id: block.id,
+                      content: "Image generated and placed on the canvas.",
+                    });
+                  } else if (result.status === "nsfw") {
+                    toolResults.push({
+                      type: "tool_result",
+                      tool_use_id: block.id,
+                      content: "Content was blocked by moderation (nsfw).",
+                      is_error: true,
+                    });
+                  } else {
+                    toolResults.push({
+                      type: "tool_result",
+                      tool_use_id: block.id,
+                      content: result.error ?? `Generation ended: ${result.status}`,
+                      is_error: true,
+                    });
+                  }
+                } catch (e) {
+                  toolResults.push({
+                    type: "tool_result",
+                    tool_use_id: block.id,
+                    content:
+                      e instanceof Error ? e.message : "Image generation failed",
+                    is_error: true,
+                  });
+                }
+              } else if (block.name === "generate_video") {
+                try {
+                  const input = block.input as {
+                    image_url: string;
+                    prompt: string;
+                    duration?: number;
+                  };
+                  const hfBody: Record<string, unknown> = {
+                    image_url: input.image_url,
+                    prompt: input.prompt,
+                  };
+                  if (typeof input.duration === "number") {
+                    hfBody.duration = input.duration;
+                  }
+                  const submitted = await submitGeneration(
+                    getDefaultVideoModel(),
+                    hfBody
+                  );
+                  const result = await pollUntilTerminal(submitted.request_id);
+                  if (result.status === "completed" && result.video?.url) {
+                    send({
+                      type: "action",
+                      action: {
+                        type: "show_generated_video",
+                        videoUrl: result.video.url,
+                      },
+                    });
+                    toolResults.push({
+                      type: "tool_result",
+                      tool_use_id: block.id,
+                      content: "Video generated; showing in the player.",
+                    });
+                  } else if (result.status === "nsfw") {
+                    toolResults.push({
+                      type: "tool_result",
+                      tool_use_id: block.id,
+                      content: "Content was blocked by moderation (nsfw).",
+                      is_error: true,
+                    });
+                  } else {
+                    toolResults.push({
+                      type: "tool_result",
+                      tool_use_id: block.id,
+                      content: result.error ?? `Generation ended: ${result.status}`,
+                      is_error: true,
+                    });
+                  }
+                } catch (e) {
+                  toolResults.push({
+                    type: "tool_result",
+                    tool_use_id: block.id,
+                    content:
+                      e instanceof Error ? e.message : "Video generation failed",
+                    is_error: true,
+                  });
+                }
               } else {
-                toolResults.push({
-                  type: "tool_result",
-                  tool_use_id: block.id,
-                  content: "Unknown action",
-                  is_error: true,
-                });
+                const action = toolCallToAction(
+                  block.name,
+                  block.input as Record<string, unknown>
+                );
+
+                if (action) {
+                  send({ type: "action", action });
+                  toolResults.push({
+                    type: "tool_result",
+                    tool_use_id: block.id,
+                    content: `Action ${action.type} executed successfully`,
+                  });
+                } else {
+                  toolResults.push({
+                    type: "tool_result",
+                    tool_use_id: block.id,
+                    content: "Unknown action",
+                    is_error: true,
+                  });
+                }
               }
             }
           }
