@@ -116,16 +116,8 @@ export function useYjsStore(
   /** Set synchronously in layout effect so pushes work before React state commits. */
   const docRef = useRef<Y.Doc | null>(null);
   const providerRef = useRef<WebsocketProvider | null>(null);
-  /** Latest Excalidraw API for rAF callbacks (avoids stale closures). */
+  /** Latest Excalidraw API inside layout-effect observers (avoids stale closures). */
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
-
-  /** Coalesce outbound Yjs writes to one frame (full-scene replace is expensive over WS). */
-  const outboundRafRef = useRef(0);
-  const pendingElementsRef = useRef<readonly ExcalidrawElement[] | null>(null);
-  const flushOutboundToYRef = useRef<() => void>(() => {});
-
-  /** Coalesce inbound remote Yjs updates to at most one updateScene per frame. */
-  const remoteFlushRafRef = useRef(0);
 
   const pushCollaborators = useCallback(
     (provider: WebsocketProvider | null, excalidrawApi: ExcalidrawImperativeAPI) => {
@@ -177,11 +169,18 @@ export function useYjsStore(
   const onElementsChange = useCallback(
     (elements: readonly ExcalidrawElement[]) => {
       if (suppressRemoteRef.current) return;
-      if (!docRef.current) return;
-      pendingElementsRef.current = elements;
-      if (outboundRafRef.current !== 0) return;
-      outboundRafRef.current = requestAnimationFrame(() => {
-        flushOutboundToYRef.current();
+      const doc = docRef.current;
+      if (!doc) return;
+      const yEls = doc.getArray<Y.Map<unknown>>("elements");
+      doc.transact(() => {
+        yEls.delete(0, yEls.length);
+        for (const el of elements) {
+          const yEl = new Y.Map<unknown>();
+          for (const [k, v] of Object.entries(el)) {
+            yEl.set(k, v);
+          }
+          yEls.push([yEl]);
+        }
       });
     },
     []
@@ -260,28 +259,8 @@ export function useYjsStore(
     const yElements = doc.getArray<Y.Map<unknown>>("elements");
     const ySceneFiles = doc.getMap<unknown>("sceneFiles");
 
-    flushOutboundToYRef.current = () => {
-      outboundRafRef.current = 0;
-      const elements = pendingElementsRef.current;
-      pendingElementsRef.current = null;
-      if (suppressRemoteRef.current) return;
-      const d = docRef.current;
-      if (!d || !elements) return;
-      const yEls = d.getArray<Y.Map<unknown>>("elements");
-      d.transact(() => {
-        yEls.delete(0, yEls.length);
-        for (const el of elements) {
-          const yEl = new Y.Map<unknown>();
-          for (const [k, v] of Object.entries(el)) {
-            yEl.set(k, v);
-          }
-          yEls.push([yEl]);
-        }
-      });
-    };
-
-    const runRemoteSceneFlush = () => {
-      remoteFlushRafRef.current = 0;
+    const flushElementsFromRemoteY = (transaction: Transaction) => {
+      if (transaction.local) return;
       const drawApi = apiRef.current;
       if (!drawApi) return;
       if (yElements.length === 0) return;
@@ -305,9 +284,7 @@ export function useYjsStore(
       _events: YEvent<Y.AbstractType<unknown>>[],
       transaction: Transaction
     ) => {
-      if (transaction.local) return;
-      if (remoteFlushRafRef.current !== 0) return;
-      remoteFlushRafRef.current = requestAnimationFrame(runRemoteSceneFlush);
+      flushElementsFromRemoteY(transaction);
     };
     yElements.observeDeep(onYElementsDeep);
 
@@ -371,17 +348,6 @@ export function useYjsStore(
     });
 
     return () => {
-      if (outboundRafRef.current !== 0) {
-        cancelAnimationFrame(outboundRafRef.current);
-        outboundRafRef.current = 0;
-      }
-      if (remoteFlushRafRef.current !== 0) {
-        cancelAnimationFrame(remoteFlushRafRef.current);
-        remoteFlushRafRef.current = 0;
-      }
-      pendingElementsRef.current = null;
-      flushOutboundToYRef.current = () => {};
-
       docRef.current = null;
       providerRef.current = null;
       provider.awareness.off("update", onAwareness);
