@@ -212,7 +212,7 @@ export function BoardInviteDialog({ boardId }: BoardInviteDialogProps) {
                           ev.target.value === "viewer" ? "viewer" : "editor",
                         )
                       }
-                      className="h-7 max-w-[7.5rem] rounded-md border border-input bg-background px-1.5 text-[0.7rem] outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                      className="h-7 max-w-30 rounded-md border border-input bg-background px-1.5 text-[0.7rem] outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                       aria-label={`Role for ${m.email}`}
                     >
                       <option value="editor">Editor</option>
