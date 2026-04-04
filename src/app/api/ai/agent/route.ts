@@ -63,7 +63,7 @@ export async function POST(request: Request) {
 
         while (continueLoop) {
           const response = await anthropic.messages.create({
-            model: "claude-sonnet-4-20250514",
+            model: "claude-haiku-4-5",
             max_tokens: 4096,
             system: BRAINSTORM_AGENT_SYSTEM_PROMPT,
             tools: AGENT_TOOLS,
