@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { boards } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
 import { headers } from "next/headers";
+import { getBoardAccess } from "@/lib/boards/access";
 
 async function getSessionUser() {
   const session = await auth.api.getSession({
@@ -23,11 +24,12 @@ export async function GET(
 
   const { id } = await params;
 
-  const [board] = await db.select().from(boards).where(eq(boards.id, id));
-
-  if (!board || board.ownerId !== user.id) {
+  const access = await getBoardAccess(id, user.id);
+  if (!access) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
+
+  const { board, role, canEdit } = access;
 
   return NextResponse.json({
     id: board.id,
@@ -36,6 +38,9 @@ export async function GET(
     sceneFiles: board.sceneFiles,
     pinnedVideoUrl: board.pinnedVideoUrl,
     updatedAt: board.updatedAt,
+    role,
+    canEdit,
+    ownerId: board.ownerId,
   });
 }
 
@@ -88,10 +93,16 @@ export async function PATCH(
     );
   }
 
-  const [board] = await db.select().from(boards).where(eq(boards.id, id));
-
-  if (!board || board.ownerId !== user.id) {
+  const access = await getBoardAccess(id, user.id);
+  if (!access) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  if (!access.canEdit) {
+    return NextResponse.json(
+      { error: "Viewer role cannot edit this board" },
+      { status: 403 }
+    );
   }
 
   const [updated] = await db

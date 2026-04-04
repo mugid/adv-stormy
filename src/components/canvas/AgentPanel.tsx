@@ -16,6 +16,8 @@ export interface AgentMessage {
 interface AgentPanelProps {
   mode: CanvasInputMode;
   onModeChange: (mode: CanvasInputMode) => void;
+  /** When false (e.g. board viewer), inputs are disabled */
+  canEdit?: boolean;
   onBrainstormSubmit: (message: string) => void;
   onImageSubmit: (payload: {
     prompt: string;
@@ -37,6 +39,7 @@ interface AgentPanelProps {
 export function AgentPanel({
   mode,
   onModeChange,
+  canEdit = true,
   onBrainstormSubmit,
   onImageSubmit,
   onVideoSubmit,
@@ -54,6 +57,7 @@ export function AgentPanel({
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const busy = mode === "brainstorm" ? isBrainstormBusy : isMediaBusy;
+  const locked = busy || !canEdit;
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -61,7 +65,7 @@ export function AgentPanel({
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (busy) return;
+    if (!canEdit || busy) return;
 
     if (mode === "brainstorm") {
       const trimmed = input.trim();
@@ -142,7 +146,7 @@ export function AgentPanel({
             onChange={(e) => setVideoImageUrl(e.target.value)}
             placeholder="Source image URL (https://…)"
             className="border-border/80 bg-background/80"
-            disabled={busy}
+            disabled={locked}
           />
         )}
         {mode === "image" && (
@@ -151,7 +155,7 @@ export function AgentPanel({
               value={aspectRatio}
               onChange={(e) => setAspectRatio(e.target.value)}
               className="h-9 rounded-md border border-border bg-background px-2 text-xs"
-              disabled={busy}
+              disabled={locked}
             >
               <option value="16:9">16:9</option>
               <option value="9:16">9:16</option>
@@ -162,7 +166,7 @@ export function AgentPanel({
               value={resolution}
               onChange={(e) => setResolution(e.target.value)}
               className="h-9 grow rounded-md border border-border bg-background px-2 text-xs"
-              disabled={busy}
+              disabled={locked}
             >
               <option value="720p">720p</option>
               <option value="1080p">1080p</option>
@@ -178,6 +182,7 @@ export function AgentPanel({
               className="h-8 px-2"
               onClick={() => onModeChange("brainstorm")}
               title="Brainstorm"
+              disabled={locked}
             >
               <Sparkles className="h-4 w-4" />
             </Button>
@@ -188,6 +193,7 @@ export function AgentPanel({
               className="h-8 px-2"
               onClick={() => onModeChange("image")}
               title="Image"
+              disabled={locked}
             >
               <ImageIcon className="h-4 w-4" />
             </Button>
@@ -198,6 +204,7 @@ export function AgentPanel({
               className="h-8 px-2"
               onClick={() => onModeChange("video")}
               title="Video"
+              disabled={locked}
             >
               <Film className="h-4 w-4" />
             </Button>
@@ -207,7 +214,7 @@ export function AgentPanel({
             onChange={(e) => setInput(e.target.value)}
             placeholder={placeholder}
             className="min-w-0 flex-1 border-0 bg-transparent shadow-none focus-visible:ring-0"
-            disabled={busy}
+            disabled={locked}
           />
           {mode === "brainstorm" && busy ? (
             <Button type="button" variant="ghost" size="sm" onClick={onBrainstormCancel}>
@@ -218,7 +225,7 @@ export function AgentPanel({
               type="submit"
               size="sm"
               disabled={
-                busy ||
+                locked ||
                 (mode === "video"
                   ? !input.trim() || !videoImageUrl.trim()
                   : !input.trim())

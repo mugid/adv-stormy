@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { boards, mediaGenerationJobs } from "@/lib/db/schema";
+import { mediaGenerationJobs } from "@/lib/db/schema";
 import { headers } from "next/headers";
 import { nanoid } from "nanoid";
 import {
@@ -9,7 +9,7 @@ import {
   getDefaultVideoModel,
   submitGeneration,
 } from "@/lib/higgsfield/client";
-import { eq } from "drizzle-orm";
+import { getBoardAccess } from "@/lib/boards/access";
 async function getSessionUser() {
   const session = await auth.api.getSession({
     headers: await headers(),
@@ -35,8 +35,8 @@ export async function POST(request: NextRequest) {
       : null;
 
   if (boardId) {
-    const [b] = await db.select().from(boards).where(eq(boards.id, boardId));
-    if (!b || b.ownerId !== user.id) {
+    const access = await getBoardAccess(boardId, user.id);
+    if (!access?.canEdit) {
       return NextResponse.json({ error: "Board not found" }, { status: 404 });
     }
   }

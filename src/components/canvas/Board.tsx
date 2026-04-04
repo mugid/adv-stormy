@@ -11,6 +11,7 @@ import "@excalidraw/excalidraw/index.css";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ImportedDataState } from "@excalidraw/excalidraw/data/types";
 import { AgentPanel, type CanvasInputMode, type AgentMessage } from "./AgentPanel";
+import { BoardInviteDialog } from "./BoardInviteDialog";
 import { AgentCursor } from "./AgentCursor";
 import { useCanvasAgent } from "@/lib/agent/use-canvas-agent";
 import { placeRemoteImageOnCanvas } from "@/lib/excalidraw/place-remote-image";
@@ -18,9 +19,12 @@ import {
   collectReferencedImageFileIds,
   dataURLToUploadFile,
   hydrateBoardSceneFiles,
+  buildSceneFilePatchForYjs,
   type BoardSceneFiles,
 } from "@/lib/excalidraw/board-scene-files";
 import { uploadBoardFileViaImageKit } from "@/lib/imagekit/client-upload";
+import { useYjsStore } from "@/lib/sync/useYjsStore";
+import { useSession } from "@/lib/auth-client";
 import { Button } from "@/components/ui/button";
 import { Clapperboard, X } from "lucide-react";
 
@@ -58,7 +62,10 @@ async function pollMediaUntilTerminal(requestId: string) {
 }
 
 export function Board({ boardId }: BoardProps) {
+  const { data: session } = useSession();
   const [api, setApi] = useState<ExcalidrawImperativeAPI | null>(null);
+  const [canEdit, setCanEdit] = useState(true);
+  const canEditRef = useRef(true);
   const [boot, setBoot] = useState<
     | { status: "loading" }
     | { status: "error"; message: string }
@@ -71,9 +78,25 @@ export function Board({ boardId }: BoardProps) {
     new Map<string, { dataURL: string; url: string }>(),
   );
   const lastPersistedAgentVideoRef = useRef<string | null>(null);
+  const collabSeedDoneRef = useRef(false);
+  const [boardRole, setBoardRole] = useState<
+    "owner" | "editor" | "viewer" | null
+  >(null);
   const agent = useCanvasAgent(api);
 
+  const collabApi =
+    boot.status === "ready" ? api : null;
+  const yjs = useYjsStore(boardId, collabApi, {
+    userName: session?.user?.name ?? session?.user?.email ?? "Guest",
+    enabled: boot.status === "ready",
+  });
+
+  useEffect(() => {
+    canEditRef.current = canEdit;
+  }, [canEdit]);
+
   const persistPinnedVideo = useCallback(async (url: string | null) => {
+    if (!canEditRef.current) return;
     try {
       await fetch(`/api/boards/${boardId}`, {
         method: "PATCH",
@@ -112,10 +135,12 @@ export function Board({ boardId }: BoardProps) {
   useEffect(() => {
     let cancelled = false;
     persistOkRef.current = false;
+    setBoardRole(null);
     setBoot({ status: "loading" });
 
     async function load() {
       lastPersistedAgentVideoRef.current = null;
+      collabSeedDoneRef.current = false;
       const res = await fetch(`/api/boards/${boardId}`);
       if (cancelled) return;
       if (res.status === 401) {
@@ -134,9 +159,13 @@ export function Board({ boardId }: BoardProps) {
         sceneJson?: string | null;
         sceneFiles?: BoardSceneFiles | null;
         pinnedVideoUrl?: string | null;
+        canEdit?: boolean;
+        role?: "owner" | "editor" | "viewer";
       } = await res.json();
       if (cancelled) return;
 
+      setBoardRole(data.role ?? null);
+      setCanEdit(data.canEdit !== false);
       serverSceneFilesRef.current = data.sceneFiles ?? {};
       uploadCacheRef.current.clear();
       setLocalVideoUrl(data.pinnedVideoUrl ?? null);
@@ -195,11 +224,39 @@ export function Board({ boardId }: BoardProps) {
   useEffect(() => {
     const u = agent.generatedVideoUrl;
     if (!u || u === lastPersistedAgentVideoRef.current) return;
+    if (!canEditRef.current) return;
     lastPersistedAgentVideoRef.current = u;
     setLocalVideoUrl(u);
     setVideoOverlayDismissed(false);
     void persistPinnedVideo(u);
   }, [agent.generatedVideoUrl, persistPinnedVideo]);
+
+  useEffect(() => {
+    if (boot.status !== "ready") return;
+    collabSeedDoneRef.current = false;
+  }, [boardId, boot.status]);
+
+  useEffect(() => {
+    if (
+      boot.status !== "ready" ||
+      yjs.state?.status !== "connected" ||
+      !api ||
+      collabSeedDoneRef.current ||
+      !canEdit
+    ) {
+      return;
+    }
+    collabSeedDoneRef.current = true;
+    const patch = buildSceneFilePatchForYjs(
+      api.getSceneElements(),
+      api.getFiles(),
+      serverSceneFilesRef.current,
+      uploadCacheRef.current,
+    );
+    if (Object.keys(patch).length > 0) {
+      yjs.onSceneFilesChange(patch);
+    }
+  }, [yjs.state?.status, yjs.onSceneFilesChange, api, canEdit, boot.status]);
 
   useEffect(() => {
     if (boot.status !== "ready" || !api) return;
@@ -222,12 +279,13 @@ export function Board({ boardId }: BoardProps) {
       appState: Parameters<typeof serializeAsJSON>[1],
       files: Parameters<typeof serializeAsJSON>[2],
     ) => {
-      if (!persistOkRef.current) return;
+      if (!persistOkRef.current || !canEditRef.current) return;
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = window.setTimeout(() => {
         saveTimerRef.current = null;
         void (async () => {
           try {
+            if (!canEditRef.current) return;
             if (!imageKitConfigured) {
               const sceneJson = serializeAsJSON(
                 elements,
@@ -308,8 +366,19 @@ export function Board({ boardId }: BoardProps) {
       files: Parameters<typeof serializeAsJSON>[2],
     ) => {
       scheduleSave(elements, appState, files);
+      if (canEdit && yjs.state) {
+        yjs.onElementsChange(elements);
+        yjs.onSceneFilesChange(
+          buildSceneFilePatchForYjs(
+            elements,
+            files,
+            serverSceneFilesRef.current,
+            uploadCacheRef.current,
+          ),
+        );
+      }
     },
-    [scheduleSave],
+    [scheduleSave, canEdit, yjs],
   );
 
   const handleImageSubmit = useCallback(
@@ -533,6 +602,30 @@ export function Board({ boardId }: BoardProps) {
 
   return (
     <div className="relative h-full min-h-0 w-full bg-background">
+      {boot.status === "ready" && (
+        <div className="absolute left-4 top-4 z-50 flex flex-wrap items-center gap-2">
+          {boardRole === "owner" ? (
+            <BoardInviteDialog boardId={boardId} />
+          ) : null}
+          <div className="rounded-md border border-border bg-background/90 px-2 py-1 text-xs text-muted-foreground shadow-sm backdrop-blur-sm">
+            Live sync:{" "}
+            <span className="font-medium text-foreground">
+              {yjs.state?.status === "connected"
+                ? "connected"
+                : yjs.state?.status === "connecting"
+                  ? "connecting…"
+                  : yjs.state?.status === "disconnected"
+                    ? "disconnected"
+                    : "…"}
+            </span>
+            {!canEdit ? (
+              <span className="ml-2 text-amber-600 dark:text-amber-400">
+                View only
+              </span>
+            ) : null}
+          </div>
+        </div>
+      )}
       {showVideoPlayer && (
         <div className="absolute right-4 top-4 z-50 w-full max-w-md rounded-lg border border-border bg-background/95 p-3 shadow-lg backdrop-blur-sm">
           <div className="mb-2 flex items-center justify-between gap-2">
@@ -577,6 +670,9 @@ export function Board({ boardId }: BoardProps) {
           excalidrawAPI={(a) => setApi(a)}
           initialData={boot.initialData}
           onChange={onExcalidrawChange}
+          viewModeEnabled={!canEdit}
+          isCollaborating={boot.status === "ready"}
+          onPointerUpdate={yjs.handlePointerUpdate}
         />
       </div>
       {api && (
@@ -590,6 +686,7 @@ export function Board({ boardId }: BoardProps) {
           <AgentPanel
             mode={inputMode}
             onModeChange={setInputMode}
+            canEdit={canEdit}
             onBrainstormSubmit={agent.prompt}
             onImageSubmit={handleImageSubmit}
             onVideoSubmit={handleVideoSubmit}

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { boards, boardMembers } from "@/lib/db/schema";
-import { eq, desc } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { headers } from "next/headers";
 
 async function getUser(request: NextRequest) {
@@ -12,17 +12,35 @@ async function getUser(request: NextRequest) {
   return session?.user ?? null;
 }
 
-export async function GET(request: NextRequest) {
-  const user = await getUser(request);
+export async function GET(_request: NextRequest) {
+  const user = await getUser(_request);
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const userBoards = await db
+  const owned = await db
     .select()
     .from(boards)
-    .where(eq(boards.ownerId, user.id))
-    .orderBy(desc(boards.updatedAt));
+    .where(eq(boards.ownerId, user.id));
+
+  const memberRows = await db
+    .select({ boardId: boardMembers.boardId })
+    .from(boardMembers)
+    .where(eq(boardMembers.userId, user.id));
+
+  const memberIds = [...new Set(memberRows.map((r) => r.boardId))];
+  const shared =
+    memberIds.length > 0
+      ? await db.select().from(boards).where(inArray(boards.id, memberIds))
+      : [];
+
+  const byId = new Map<string, (typeof owned)[number]>();
+  for (const b of owned) byId.set(b.id, b);
+  for (const b of shared) byId.set(b.id, b);
+
+  const userBoards = [...byId.values()].sort(
+    (a, b) => b.updatedAt.getTime() - a.updatedAt.getTime()
+  );
 
   return NextResponse.json(userBoards);
 }

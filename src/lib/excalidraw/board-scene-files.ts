@@ -4,13 +4,39 @@ import type {
   BinaryFiles,
   DataURL,
 } from "@excalidraw/excalidraw/types";
-
-export type BoardSceneFileEntry = {
+export type YjsSceneFileEntry = {
   url: string;
   mimeType: string;
 };
 
+export type BoardSceneFileEntry = YjsSceneFileEntry;
+
 export type BoardSceneFiles = Record<string, BoardSceneFileEntry>;
+
+/** ImageKit-backed entries to broadcast over Yjs for collaborators */
+export function buildSceneFilePatchForYjs(
+  elements: readonly ExcalidrawElement[],
+  files: BinaryFiles,
+  serverMap: BoardSceneFiles,
+  uploadCache: Map<string, { dataURL: string; url: string }>
+): Record<string, YjsSceneFileEntry> {
+  const ids = collectReferencedImageFileIds(elements);
+  const out: Record<string, YjsSceneFileEntry> = {};
+  for (const id of ids) {
+    const local = files[id];
+    if (!local) continue;
+    const cached = uploadCache.get(id);
+    if (cached?.url) {
+      out[id] = { url: cached.url, mimeType: local.mimeType };
+      continue;
+    }
+    const fromServer = serverMap[id];
+    if (fromServer?.url) {
+      out[id] = { url: fromServer.url, mimeType: local.mimeType };
+    }
+  }
+  return out;
+}
 
 export function collectReferencedImageFileIds(
   elements: readonly ExcalidrawElement[]
