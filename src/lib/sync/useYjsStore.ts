@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import {
+  useLayoutEffect,
+  useRef,
+  useState,
+  useCallback,
+  useMemo,
+} from "react";
 import { CaptureUpdateAction } from "@excalidraw/excalidraw";
 import type {
   Collaborator,
@@ -9,6 +15,7 @@ import type {
 } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import * as Y from "yjs";
+import type { Transaction, YEvent } from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import type { YjsSceneFileEntry } from "@/lib/excalidraw/board-scene-files";
 
@@ -105,8 +112,10 @@ export function useYjsStore(
 
   const [state, setState] = useState<YjsSyncState | null>(null);
   const suppressRemoteRef = useRef(false);
-  const suppressLocalRef = useRef(false);
   const applyingSceneFilesRef = useRef(false);
+  /** Set synchronously in layout effect so pushes work before React state commits. */
+  const docRef = useRef<Y.Doc | null>(null);
+  const providerRef = useRef<WebsocketProvider | null>(null);
 
   const pushCollaborators = useCallback(
     (provider: WebsocketProvider | null, excalidrawApi: ExcalidrawImperativeAPI) => {
@@ -157,11 +166,11 @@ export function useYjsStore(
 
   const onElementsChange = useCallback(
     (elements: readonly ExcalidrawElement[]) => {
-      if (suppressRemoteRef.current || !state) return;
-      const { doc } = state;
+      if (suppressRemoteRef.current) return;
+      const doc = docRef.current;
+      if (!doc) return;
       const yEls = doc.getArray<Y.Map<unknown>>("elements");
 
-      suppressLocalRef.current = true;
       doc.transact(() => {
         yEls.delete(0, yEls.length);
         for (const el of elements) {
@@ -172,18 +181,22 @@ export function useYjsStore(
           yEls.push([yEl]);
         }
       });
-      suppressLocalRef.current = false;
     },
-    [state]
+    []
   );
 
   const onSceneFilesChange = useCallback(
     (patch: Record<string, YjsSceneFileEntry>) => {
-      if (suppressRemoteRef.current || !state || applyingSceneFilesRef.current)
+      const doc = docRef.current;
+      if (
+        suppressRemoteRef.current ||
+        !doc ||
+        applyingSceneFilesRef.current
+      ) {
         return;
-      const yFiles = state.doc.getMap<unknown>("sceneFiles");
-      suppressLocalRef.current = true;
-      state.doc.transact(() => {
+      }
+      const yFiles = doc.getMap<unknown>("sceneFiles");
+      doc.transact(() => {
         for (const [id, entry] of Object.entries(patch)) {
           if (!entry?.url) continue;
           const cur = yFiles.get(id) as YjsSceneFileEntry | undefined;
@@ -192,9 +205,8 @@ export function useYjsStore(
           yFiles.set(id, { url: entry.url, mimeType: entry.mimeType });
         }
       });
-      suppressLocalRef.current = false;
     },
-    [state]
+    []
   );
 
   const handlePointerUpdate = useCallback(
@@ -202,30 +214,35 @@ export function useYjsStore(
       pointer: { x: number; y: number; tool: "pointer" | "laser" };
       button: "down" | "up";
     }) => {
-      if (!state?.provider || suppressRemoteRef.current) return;
-      state.provider.awareness.setLocalStateField("pointer", {
+      const provider = providerRef.current;
+      if (!provider || suppressRemoteRef.current) return;
+      provider.awareness.setLocalStateField("pointer", {
         x: payload.pointer.x,
         y: payload.pointer.y,
         tool: payload.pointer.tool,
         button: payload.button,
       });
     },
-    [state]
+    []
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!enabled || !api) {
+      docRef.current = null;
+      providerRef.current = null;
       // Collab disabled: clear WS state when navigating away or before canvas is ready.
       queueMicrotask(() => setState(null));
       return;
     }
 
     const doc = new Y.Doc();
+    docRef.current = doc;
     const wsUrl = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:1234";
 
     const provider = new WebsocketProvider(wsUrl, roomId, doc, {
       connect: true,
     });
+    providerRef.current = provider;
 
     if (userName) {
       provider.awareness.setLocalStateField("user", {
@@ -237,8 +254,10 @@ export function useYjsStore(
     const yElements = doc.getArray<Y.Map<unknown>>("elements");
     const ySceneFiles = doc.getMap<unknown>("sceneFiles");
 
-    const flushElements = () => {
-      if (suppressLocalRef.current || !api) return;
+    const flushElements = (transaction: Transaction) => {
+      if (!api) return;
+      // Local Y updates come from our own onChange → Y push; canvas is already authoritative.
+      if (transaction.local) return;
       if (yElements.length === 0) return;
       const elements: ExcalidrawElement[] = [];
       yElements.forEach((yEl) => {
@@ -256,9 +275,16 @@ export function useYjsStore(
       suppressRemoteRef.current = false;
     };
 
-    yElements.observeDeep(flushElements);
+    const onYElementsDeep = (
+      _events: YEvent<Y.AbstractType<unknown>>[],
+      transaction: Transaction
+    ) => {
+      flushElements(transaction);
+    };
+    yElements.observeDeep(onYElementsDeep);
 
-    const onYFiles = () => {
+    const onYFiles = (_event: unknown, transaction: Transaction) => {
+      if (transaction.local) return;
       void applySceneFilesFromY(ySceneFiles, api);
     };
     ySceneFiles.observe(onYFiles);
@@ -271,7 +297,6 @@ export function useYjsStore(
     const seedYjsFromExcalidrawIfEmpty = () => {
       if (!api || yElements.length > 0) return;
       const elements = api.getSceneElements();
-      suppressLocalRef.current = true;
       doc.transact(() => {
         for (const el of elements) {
           const yEl = new Y.Map<unknown>();
@@ -281,7 +306,6 @@ export function useYjsStore(
           yElements.push([yEl]);
         }
       });
-      suppressLocalRef.current = false;
     };
 
     const onSync = (...args: unknown[]) => {
@@ -308,10 +332,12 @@ export function useYjsStore(
     });
 
     return () => {
+      docRef.current = null;
+      providerRef.current = null;
       provider.awareness.off("update", onAwareness);
       provider.off("status", onStatus);
       provider.off("sync", onSync);
-      yElements.unobserveDeep(flushElements);
+      yElements.unobserveDeep(onYElementsDeep);
       ySceneFiles.unobserve(onYFiles);
       provider.disconnect();
       provider.destroy();

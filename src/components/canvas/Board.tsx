@@ -366,7 +366,7 @@ export function Board({ boardId }: BoardProps) {
       files: Parameters<typeof serializeAsJSON>[2],
     ) => {
       scheduleSave(elements, appState, files);
-      if (canEdit && yjs.state) {
+      if (canEdit) {
         yjs.onElementsChange(elements);
         yjs.onSceneFilesChange(
           buildSceneFilePatchForYjs(
@@ -378,7 +378,7 @@ export function Board({ boardId }: BoardProps) {
         );
       }
     },
-    [scheduleSave, canEdit, yjs],
+    [scheduleSave, canEdit, yjs.onElementsChange, yjs.onSceneFilesChange],
   );
 
   const handleImageSubmit = useCallback(
