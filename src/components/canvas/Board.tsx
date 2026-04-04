@@ -256,7 +256,7 @@ export function Board({ boardId }: BoardProps) {
     if (Object.keys(patch).length > 0) {
       yjs.onSceneFilesChange(patch);
     }
-  }, [yjs.state?.status, yjs.onSceneFilesChange, api, canEdit, boot.status]);
+  }, [yjs, api, canEdit, boot.status]);
 
   useEffect(() => {
     if (boot.status !== "ready" || !api) return;
@@ -378,7 +378,7 @@ export function Board({ boardId }: BoardProps) {
         );
       }
     },
-    [scheduleSave, canEdit, yjs.onElementsChange, yjs.onSceneFilesChange],
+    [scheduleSave, canEdit, yjs],
   );
 
   const handleImageSubmit = useCallback(
