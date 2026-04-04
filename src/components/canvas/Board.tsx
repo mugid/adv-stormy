@@ -22,7 +22,7 @@ import {
 } from "@/lib/excalidraw/board-scene-files";
 import { uploadBoardFileViaImageKit } from "@/lib/imagekit/client-upload";
 import { Button } from "@/components/ui/button";
-import { X } from "lucide-react";
+import { Clapperboard, X } from "lucide-react";
 
 const imageKitConfigured =
   typeof process.env.NEXT_PUBLIC_IMAGEKIT_PUBLIC_KEY === "string" &&
@@ -90,16 +90,24 @@ export function Board({ boardId }: BoardProps) {
   const [isMediaBusy, setIsMediaBusy] = useState(false);
   const [mediaHint, setMediaHint] = useState("");
   const [localVideoUrl, setLocalVideoUrl] = useState<string | null>(null);
+  /** When true, the player is hidden but `pinnedVideoUrl` (and local URL) stay for recovery */
+  const [videoOverlayDismissed, setVideoOverlayDismissed] = useState(false);
 
   const panelMessages = inputMode === "brainstorm" ? agent.messages : mediaLog;
   const videoUrl = localVideoUrl ?? agent.generatedVideoUrl;
+  const showVideoPlayer = Boolean(videoUrl) && !videoOverlayDismissed;
+  const hasRecoverableVideo = Boolean(videoUrl) && videoOverlayDismissed;
 
-  const clearVideo = useCallback(() => {
-    setLocalVideoUrl(null);
-    lastPersistedAgentVideoRef.current = null;
+  const dismissVideoOverlay = useCallback(() => {
+    const u = localVideoUrl ?? agent.generatedVideoUrl;
+    if (u) setLocalVideoUrl(u);
+    setVideoOverlayDismissed(true);
     agent.clearGeneratedVideo();
-    void persistPinnedVideo(null);
-  }, [agent, persistPinnedVideo]);
+  }, [agent, localVideoUrl]);
+
+  const openVideoOverlay = useCallback(() => {
+    setVideoOverlayDismissed(false);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -132,6 +140,7 @@ export function Board({ boardId }: BoardProps) {
       serverSceneFilesRef.current = data.sceneFiles ?? {};
       uploadCacheRef.current.clear();
       setLocalVideoUrl(data.pinnedVideoUrl ?? null);
+      setVideoOverlayDismissed(false);
 
       let initial: ReturnType<typeof restore>;
       if (data.sceneJson && data.sceneJson.length > 0) {
@@ -188,6 +197,7 @@ export function Board({ boardId }: BoardProps) {
     if (!u || u === lastPersistedAgentVideoRef.current) return;
     lastPersistedAgentVideoRef.current = u;
     setLocalVideoUrl(u);
+    setVideoOverlayDismissed(false);
     void persistPinnedVideo(u);
   }, [agent.generatedVideoUrl, persistPinnedVideo]);
 
@@ -414,6 +424,7 @@ export function Board({ boardId }: BoardProps) {
         if (result.status === "completed" && result.video?.url) {
           const vUrl = result.video.url;
           setLocalVideoUrl(vUrl);
+          setVideoOverlayDismissed(false);
           lastPersistedAgentVideoRef.current = vUrl;
           void persistPinnedVideo(vUrl);
           setMediaLog((prev) => [
@@ -522,22 +533,42 @@ export function Board({ boardId }: BoardProps) {
 
   return (
     <div className="relative h-full min-h-0 w-full bg-background">
-      {videoUrl && (
+      {showVideoPlayer && (
         <div className="absolute right-4 top-4 z-50 w-full max-w-md rounded-lg border border-border bg-background/95 p-3 shadow-lg backdrop-blur-sm">
           <div className="mb-2 flex items-center justify-between gap-2">
             <span className="text-xs font-medium text-muted-foreground">
               Generated video
             </span>
-            <Button type="button" variant="ghost" size="icon-sm" onClick={clearVideo}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              onClick={dismissVideoOverlay}
+              aria-label="Hide video player"
+            >
               <X className="h-4 w-4" />
             </Button>
           </div>
           <video
-            src={videoUrl}
+            src={videoUrl!}
             controls
             className="w-full rounded-md"
             playsInline
           />
+        </div>
+      )}
+      {hasRecoverableVideo && (
+        <div className="absolute right-4 top-4 z-50">
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="gap-2 shadow-md"
+            onClick={openVideoOverlay}
+          >
+            <Clapperboard className="h-4 w-4" />
+            Show video
+          </Button>
         </div>
       )}
       <div className="absolute inset-0 z-0 [&_.excalidraw]:h-full [&_.excalidraw]:max-h-none">
