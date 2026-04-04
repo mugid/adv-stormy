@@ -1,7 +1,5 @@
 "use client";
 
-import { useEffect, useState } from "react";
-
 interface AgentCursorProps {
   x: number;
   y: number;
@@ -15,15 +13,7 @@ export function AgentCursor({
   visible,
   label = "AI Agent",
 }: AgentCursorProps) {
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    queueMicrotask(() => {
-      setMounted(true);
-    });
-  }, []);
-
-  if (!mounted || !visible) return null;
+  if (!visible) return null;
 
   return (
     <div
