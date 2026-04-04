@@ -118,6 +118,11 @@ export function useYjsStore(
   const providerRef = useRef<WebsocketProvider | null>(null);
   /** Latest Excalidraw API inside layout-effect observers (avoids stale closures). */
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
+  /** Outbound push deferred while remote apply runs (see tryFlushPendingOutboundRef). */
+  const pendingOutboundElementsRef = useRef<readonly ExcalidrawElement[] | null>(
+    null
+  );
+  const tryFlushPendingOutboundRef = useRef<() => void>(() => {});
 
   const pushCollaborators = useCallback(
     (provider: WebsocketProvider | null, excalidrawApi: ExcalidrawImperativeAPI) => {
@@ -168,7 +173,11 @@ export function useYjsStore(
 
   const onElementsChange = useCallback(
     (elements: readonly ExcalidrawElement[]) => {
-      if (suppressRemoteRef.current) return;
+      if (suppressRemoteRef.current) {
+        pendingOutboundElementsRef.current = elements;
+        queueMicrotask(() => tryFlushPendingOutboundRef.current());
+        return;
+      }
       const doc = docRef.current;
       if (!doc) return;
       const yEls = doc.getArray<Y.Map<unknown>>("elements");
@@ -232,9 +241,11 @@ export function useYjsStore(
   }, [api]);
 
   useLayoutEffect(() => {
-    if (!enabled || !api) {
+    if (!enabled) {
       docRef.current = null;
       providerRef.current = null;
+      pendingOutboundElementsRef.current = null;
+      tryFlushPendingOutboundRef.current = () => {};
       // Collab disabled: clear WS state when navigating away or before canvas is ready.
       queueMicrotask(() => setState(null));
       return;
@@ -258,6 +269,28 @@ export function useYjsStore(
 
     const yElements = doc.getArray<Y.Map<unknown>>("elements");
     const ySceneFiles = doc.getMap<unknown>("sceneFiles");
+
+    tryFlushPendingOutboundRef.current = () => {
+      const els = pendingOutboundElementsRef.current;
+      const d = docRef.current;
+      if (!els || !d) return;
+      if (suppressRemoteRef.current) {
+        queueMicrotask(() => tryFlushPendingOutboundRef.current());
+        return;
+      }
+      pendingOutboundElementsRef.current = null;
+      const yEls = d.getArray<Y.Map<unknown>>("elements");
+      d.transact(() => {
+        yEls.delete(0, yEls.length);
+        for (const el of els) {
+          const yEl = new Y.Map<unknown>();
+          for (const [k, v] of Object.entries(el)) {
+            yEl.set(k, v);
+          }
+          yEls.push([yEl]);
+        }
+      });
+    };
 
     const flushElementsFromRemoteY = (transaction: Transaction) => {
       if (transaction.local) return;
@@ -348,6 +381,8 @@ export function useYjsStore(
     });
 
     return () => {
+      tryFlushPendingOutboundRef.current = () => {};
+      pendingOutboundElementsRef.current = null;
       docRef.current = null;
       providerRef.current = null;
       provider.awareness.off("update", onAwareness);
@@ -360,14 +395,27 @@ export function useYjsStore(
       doc.destroy();
       setState(null);
     };
-  }, [
-    roomId,
-    userName,
-    api,
-    enabled,
-    applySceneFilesFromY,
-    pushCollaborators,
-  ]);
+  }, [roomId, userName, enabled, applySceneFilesFromY, pushCollaborators]);
+
+  /** When `api` arrives after the room is live, seed empty Y from Excalidraw once. */
+  useLayoutEffect(() => {
+    if (!enabled || !api) return;
+    const doc = docRef.current;
+    if (!doc) return;
+    const yElements = doc.getArray<Y.Map<unknown>>("elements");
+    if (yElements.length > 0) return;
+    const elements = api.getSceneElements();
+    if (elements.length === 0) return;
+    doc.transact(() => {
+      for (const el of elements) {
+        const yEl = new Y.Map<unknown>();
+        for (const [k, v] of Object.entries(el)) {
+          yEl.set(k, v);
+        }
+        yElements.push([yEl]);
+      }
+    });
+  }, [api, enabled, roomId]);
 
   return useMemo(
     () => ({
