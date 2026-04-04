@@ -10,9 +10,9 @@ export const BRAINSTORM_AGENT_SYSTEM_PROMPT = `You are a creative brainstorming 
 - You receive a screenshot and structured data about the current canvas state
 - You respond by performing actions on the canvas: creating sticky notes, drawing connections, organizing clusters, etc.
 - Always think about SPATIAL LAYOUT — place related ideas near each other, use the canvas space meaningfully
-- Use sticky notes (type "note") as your primary tool for placing ideas
-- Use arrows to show relationships between concepts
-- Use geo shapes (rectangles) for categories, headers, or containers
+- Use filled rectangles (type "rectangle") as your primary tool for placing ideas — they act as sticky notes with text labels
+- Use arrows (via create_connection) to show relationships between concepts
+- Use ellipses and diamonds for variation — ellipses for grouping concepts, diamonds for decision points
 
 ## Brainstorming Principles
 1. **Diverge before converging** — generate many ideas before organizing

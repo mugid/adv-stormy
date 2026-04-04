@@ -1,40 +1,59 @@
-import type { Editor } from "tldraw";
+import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
+import { exportToBlob } from "@excalidraw/excalidraw";
 import type { CanvasContext, ShapeInfo } from "./types";
 
 export async function extractCanvasContext(
-  editor: Editor
+  api: ExcalidrawImperativeAPI
 ): Promise<CanvasContext> {
-  const shapes = editor.getCurrentPageShapes();
-  const viewportBounds = editor.getViewportPageBounds();
-  const selectedIds = editor.getSelectedShapeIds();
+  const elements = api.getSceneElements();
+  const appState = api.getAppState();
 
-  const shapeInfos: ShapeInfo[] = shapes.map((shape) => {
-    const bounds = editor.getShapePageBounds(shape);
-    const text = getShapeText(shape);
+  const shapeInfos: ShapeInfo[] = elements.map((el) => {
+    const text = getElementText(el);
 
     return {
-      id: shape.id,
-      type: shape.type,
-      x: shape.x,
-      y: shape.y,
-      width: bounds?.w ?? 0,
-      height: bounds?.h ?? 0,
+      id: el.id,
+      type: el.type,
+      x: el.x,
+      y: el.y,
+      width: el.width ?? 0,
+      height: el.height ?? 0,
       text: text || undefined,
-      color: (shape.props as Record<string, unknown>).color as
-        | string
-        | undefined,
-      props: shape.props as Record<string, unknown>,
+      color: el.type === "text" ? el.strokeColor : el.backgroundColor,
+      props: {
+        strokeColor: el.strokeColor,
+        backgroundColor: el.backgroundColor,
+        fillStyle: el.fillStyle,
+        groupIds: el.groupIds,
+      },
     };
   });
 
+  const zoom = appState.zoom?.value ?? 1;
+  const viewportBounds = {
+    x: -(appState.scrollX ?? 0),
+    y: -(appState.scrollY ?? 0),
+    w: (appState.width ?? 0) / zoom,
+    h: (appState.height ?? 0) / zoom,
+  };
+
+  const selectedShapeIds = Object.keys(appState.selectedElementIds ?? {}).filter(
+    (id) => appState.selectedElementIds[id]
+  );
+
   let screenshot: string | undefined;
   try {
-    if (shapes.length > 0) {
-      const result = await editor.toImage(shapes, { format: "png", scale: 0.5 });
-      if (result.blob) {
-        const buffer = await result.blob.arrayBuffer();
-        screenshot = Buffer.from(buffer).toString("base64");
-      }
+    if (elements.length > 0) {
+      const blob = await exportToBlob({
+        elements,
+        appState: { ...appState, exportBackground: true },
+        files: api.getFiles(),
+        maxWidthOrHeight: 800,
+      });
+      const buffer = await blob.arrayBuffer();
+      screenshot = btoa(
+        new Uint8Array(buffer).reduce((s, b) => s + String.fromCharCode(b), "")
+      );
     }
   } catch {
     // Screenshot may fail in certain environments
@@ -42,31 +61,13 @@ export async function extractCanvasContext(
 
   return {
     shapes: shapeInfos,
-    viewportBounds: {
-      x: viewportBounds.x,
-      y: viewportBounds.y,
-      w: viewportBounds.w,
-      h: viewportBounds.h,
-    },
-    selectedShapeIds: selectedIds as string[],
+    viewportBounds,
+    selectedShapeIds,
     screenshot,
   };
 }
 
-function getShapeText(shape: { type: string; props: unknown }): string | null {
-  const props = shape.props as Record<string, unknown>;
-  if (typeof props.text === "string") return props.text;
-  if (typeof props.richText === "object" && props.richText) {
-    return extractRichText(props.richText);
-  }
+function getElementText(el: Record<string, unknown>): string | null {
+  if (typeof el.text === "string" && el.text) return el.text as string;
   return null;
-}
-
-function extractRichText(richText: unknown): string {
-  if (!richText || typeof richText !== "object") return "";
-  const rt = richText as { content?: Array<{ content?: Array<{ text?: string }> }> };
-  if (!rt.content) return "";
-  return rt.content
-    .flatMap((block) => block.content?.map((inline) => inline.text ?? "") ?? [])
-    .join("");
 }

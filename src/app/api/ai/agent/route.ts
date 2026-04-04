@@ -178,10 +178,9 @@ function toolCallToAction(
       if (input.color) props.color = input.color;
       if (input.w) props.w = input.w;
       if (input.h) props.h = input.h;
-      if (input.geo) props.geo = input.geo;
       return {
         type: "create_shape",
-        shapeType: input.shapeType as "note" | "text" | "geo" | "arrow",
+        shapeType: input.shapeType as "rectangle" | "ellipse" | "diamond" | "text",
         x: input.x as number,
         y: input.y as number,
         props,

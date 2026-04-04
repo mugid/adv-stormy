@@ -27,7 +27,7 @@ export type AgentAction =
 
 export interface CreateShapeAction {
   type: "create_shape";
-  shapeType: "note" | "text" | "geo" | "arrow";
+  shapeType: "rectangle" | "ellipse" | "diamond" | "text";
   x: number;
   y: number;
   props: Record<string, unknown>;

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef } from "react";
-import type { Editor } from "tldraw";
+import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { AgentMessage } from "@/components/canvas/AgentPanel";
 import type { AgentAction, AgentStreamEvent } from "./types";
 import { extractCanvasContext } from "./canvas-context";
@@ -12,7 +12,7 @@ interface ConversationMessage {
   content: string;
 }
 
-export function useCanvasAgent(editor: Editor | null) {
+export function useCanvasAgent(api: ExcalidrawImperativeAPI | null) {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [isThinking, setIsThinking] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -20,7 +20,7 @@ export function useCanvasAgent(editor: Editor | null) {
 
   const prompt = useCallback(
     async (userMessage: string) => {
-      if (!editor || isThinking) return;
+      if (!api || isThinking) return;
 
       setMessages((prev) => [
         ...prev,
@@ -34,7 +34,7 @@ export function useCanvasAgent(editor: Editor | null) {
       abortRef.current = controller;
 
       try {
-        const context = await extractCanvasContext(editor);
+        const context = await extractCanvasContext(api);
 
         const response = await fetch("/api/ai/agent", {
           method: "POST",
@@ -73,7 +73,7 @@ export function useCanvasAgent(editor: Editor | null) {
 
             try {
               const event: AgentStreamEvent = JSON.parse(data);
-              handleEvent(editor, event, setMessages);
+              handleEvent(api, event, setMessages);
 
               if (event.type === "message" && event.content) {
                 assistantMessage += event.content + " ";
@@ -110,7 +110,7 @@ export function useCanvasAgent(editor: Editor | null) {
         abortRef.current = null;
       }
     },
-    [editor, isThinking]
+    [api, isThinking]
   );
 
   const cancel = useCallback(() => {
@@ -122,7 +122,7 @@ export function useCanvasAgent(editor: Editor | null) {
 }
 
 function handleEvent(
-  editor: Editor,
+  api: ExcalidrawImperativeAPI,
   event: AgentStreamEvent,
   setMessages: React.Dispatch<React.SetStateAction<AgentMessage[]>>
 ) {
@@ -137,7 +137,7 @@ function handleEvent(
       break;
     case "action":
       if (event.action) {
-        executeAction(editor, event.action);
+        executeAction(api, event.action);
       }
       break;
     case "error":

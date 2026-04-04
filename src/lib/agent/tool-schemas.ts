@@ -4,13 +4,13 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
   {
     name: "create_shape",
     description:
-      "Create a new shape on the canvas. Use 'note' for sticky notes (primary brainstorming tool), 'text' for standalone text labels, 'geo' for rectangles/containers, 'arrow' for connections between ideas.",
+      "Create a new shape on the canvas. Use 'rectangle' for sticky notes (primary brainstorming tool — filled rectangle with text label), 'text' for standalone text labels, 'ellipse' for oval shapes, 'diamond' for decision nodes. Use create_connection for arrows between shapes.",
     input_schema: {
       type: "object" as const,
       properties: {
         shapeType: {
           type: "string",
-          enum: ["note", "text", "geo"],
+          enum: ["rectangle", "text", "ellipse", "diamond"],
           description: "Type of shape to create",
         },
         x: {
@@ -46,23 +46,11 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
         },
         w: {
           type: "number",
-          description: "Width (only for geo shapes)",
+          description: "Width of the shape",
         },
         h: {
           type: "number",
-          description: "Height (only for geo shapes)",
-        },
-        geo: {
-          type: "string",
-          enum: [
-            "rectangle",
-            "ellipse",
-            "diamond",
-            "cloud",
-            "star",
-            "heart",
-          ],
-          description: "Geometry type (only for geo shapes)",
+          description: "Height of the shape",
         },
       },
       required: ["shapeType", "x", "y"],

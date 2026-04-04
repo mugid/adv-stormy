@@ -1,24 +1,51 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { createTLStore, defaultShapeUtils, type TLRecord } from "tldraw";
+import { useEffect, useRef, useState, useCallback } from "react";
+import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
+import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 
 interface YjsSyncState {
-  store: ReturnType<typeof createTLStore>;
   provider: WebsocketProvider;
   doc: Y.Doc;
   status: "connecting" | "connected" | "disconnected";
 }
 
-export function useYjsStore(roomId: string, userName?: string) {
+export function useYjsStore(
+  roomId: string,
+  api: ExcalidrawImperativeAPI | null,
+  userName?: string
+) {
   const [state, setState] = useState<YjsSyncState | null>(null);
+  const suppressRemoteRef = useRef(false);
+  const suppressLocalRef = useRef(false);
+
+  const onChange = useCallback(
+    (elements: readonly ExcalidrawElement[]) => {
+      if (suppressRemoteRef.current || !state) return;
+      const { doc } = state;
+      const yElements = doc.getArray<Y.Map<unknown>>("elements");
+
+      suppressLocalRef.current = true;
+      doc.transact(() => {
+        yElements.delete(0, yElements.length);
+        for (const el of elements) {
+          const yEl = new Y.Map<unknown>();
+          for (const [k, v] of Object.entries(el)) {
+            yEl.set(k, v);
+          }
+          yElements.push([yEl]);
+        }
+      });
+      suppressLocalRef.current = false;
+    },
+    [state]
+  );
 
   useEffect(() => {
     const doc = new Y.Doc();
-    const wsUrl =
-      process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:1234";
+    const wsUrl = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:1234";
 
     const provider = new WebsocketProvider(wsUrl, roomId, doc, {
       connect: true,
@@ -31,88 +58,25 @@ export function useYjsStore(roomId: string, userName?: string) {
       });
     }
 
-    const yShapes = doc.getMap<Y.Map<unknown>>("shapes");
-    const yBindings = doc.getMap<Y.Map<unknown>>("bindings");
+    const yElements = doc.getArray<Y.Map<unknown>>("elements");
 
-    const store = createTLStore({ shapeUtils: defaultShapeUtils });
-
-    function syncFromYjs() {
-      const records: TLRecord[] = [];
-
-      yShapes.forEach((yShape) => {
-        if (yShape) {
-          records.push(yShape.toJSON() as TLRecord);
-        }
-      });
-      yBindings.forEach((yBinding) => {
-        if (yBinding) {
-          records.push(yBinding.toJSON() as TLRecord);
+    yElements.observeDeep(() => {
+      if (suppressLocalRef.current || !api) return;
+      const elements: ExcalidrawElement[] = [];
+      yElements.forEach((yEl) => {
+        if (yEl) {
+          elements.push(yEl.toJSON() as ExcalidrawElement);
         }
       });
 
+      suppressRemoteRef.current = true;
       try {
-        store.mergeRemoteChanges(() => {
-          const existing = store.allRecords();
-          const existingIds = new Set(existing.map((r) => r.id));
-          const newIds = new Set(records.map((r) => r.id));
-
-          const toRemove = existing.filter((r) => !newIds.has(r.id));
-          const toAdd = records.filter((r) => !existingIds.has(r.id));
-          const toUpdate = records.filter((r) => existingIds.has(r.id));
-
-          if (toRemove.length) store.remove(toRemove.map((r) => r.id));
-          if (toAdd.length) store.put(toAdd);
-          if (toUpdate.length) store.put(toUpdate);
-        });
+        api.updateScene({ elements });
       } catch {
         // Sync errors on first init are expected
       }
-    }
-
-    const removeListener = store.listen(
-      ({ changes }) => {
-        doc.transact(() => {
-          for (const record of Object.values(changes.added)) {
-            const yRecord = new Y.Map<unknown>();
-            for (const [k, v] of Object.entries(record)) {
-              yRecord.set(k, v);
-            }
-            if (record.typeName === "shape") {
-              yShapes.set(record.id, yRecord);
-            } else if (record.typeName === "binding") {
-              yBindings.set(record.id, yRecord);
-            }
-          }
-
-          for (const [, to] of Object.values(changes.updated)) {
-            const target =
-              to.typeName === "shape"
-                ? yShapes
-                : to.typeName === "binding"
-                  ? yBindings
-                  : null;
-            if (!target) continue;
-            const yRecord = target.get(to.id) ?? new Y.Map<unknown>();
-            for (const [k, v] of Object.entries(to)) {
-              yRecord.set(k, v);
-            }
-            target.set(to.id, yRecord);
-          }
-
-          for (const record of Object.values(changes.removed)) {
-            if (record.typeName === "shape") {
-              yShapes.delete(record.id);
-            } else if (record.typeName === "binding") {
-              yBindings.delete(record.id);
-            }
-          }
-        });
-      },
-      { source: "user", scope: "document" }
-    );
-
-    yShapes.observeDeep(() => syncFromYjs());
-    yBindings.observeDeep(() => syncFromYjs());
+      suppressRemoteRef.current = false;
+    });
 
     provider.on("status", (event: unknown) => {
       const { status } = event as { status: string };
@@ -123,17 +87,16 @@ export function useYjsStore(roomId: string, userName?: string) {
       );
     });
 
-    setState({ store, provider, doc, status: "connecting" });
+    setState({ provider, doc, status: "connecting" });
 
     return () => {
-      removeListener();
       provider.disconnect();
       provider.destroy();
       doc.destroy();
     };
-  }, [roomId, userName]);
+  }, [roomId, userName, api]);
 
-  return state;
+  return { state, onChange };
 }
 
 function generateUserColor(name: string): string {
