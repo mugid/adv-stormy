@@ -6,6 +6,10 @@ import type { AgentMessage } from "@/components/canvas/AgentPanel";
 import type { AgentAction, AgentStreamEvent } from "./types";
 import { extractCanvasContext } from "./canvas-context";
 import { executeAction } from "./action-executor";
+import {
+  defaultAgentCursorScene,
+  scenePointForAgentAction,
+} from "./agent-cursor";
 
 interface ConversationMessage {
   role: "user" | "assistant";
@@ -15,6 +19,10 @@ interface ConversationMessage {
 export function useCanvasAgent(api: ExcalidrawImperativeAPI | null) {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [isThinking, setIsThinking] = useState(false);
+  const [agentCursorScene, setAgentCursorScene] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const historyRef = useRef<ConversationMessage[]>([]);
 
@@ -30,6 +38,7 @@ export function useCanvasAgent(api: ExcalidrawImperativeAPI | null) {
       historyRef.current.push({ role: "user", content: userMessage });
 
       setIsThinking(true);
+      setAgentCursorScene(defaultAgentCursorScene(api));
       const controller = new AbortController();
       abortRef.current = controller;
 
@@ -73,7 +82,7 @@ export function useCanvasAgent(api: ExcalidrawImperativeAPI | null) {
 
             try {
               const event: AgentStreamEvent = JSON.parse(data);
-              handleEvent(api, event, setMessages);
+              handleEvent(api, event, setMessages, setAgentCursorScene);
 
               if (event.type === "message" && event.content) {
                 assistantMessage += event.content + " ";
@@ -107,6 +116,7 @@ export function useCanvasAgent(api: ExcalidrawImperativeAPI | null) {
         }
       } finally {
         setIsThinking(false);
+        setAgentCursorScene(null);
         abortRef.current = null;
       }
     },
@@ -116,15 +126,19 @@ export function useCanvasAgent(api: ExcalidrawImperativeAPI | null) {
   const cancel = useCallback(() => {
     abortRef.current?.abort();
     setIsThinking(false);
+    setAgentCursorScene(null);
   }, []);
 
-  return { messages, isThinking, prompt, cancel };
+  return { messages, isThinking, prompt, cancel, agentCursorScene };
 }
 
 function handleEvent(
   api: ExcalidrawImperativeAPI,
   event: AgentStreamEvent,
-  setMessages: React.Dispatch<React.SetStateAction<AgentMessage[]>>
+  setMessages: React.Dispatch<React.SetStateAction<AgentMessage[]>>,
+  setAgentCursorScene: React.Dispatch<
+    React.SetStateAction<{ x: number; y: number } | null>
+  >
 ) {
   switch (event.type) {
     case "message":
@@ -138,6 +152,8 @@ function handleEvent(
     case "action":
       if (event.action) {
         executeAction(api, event.action);
+        const p = scenePointForAgentAction(api, event.action);
+        if (p) setAgentCursorScene(p);
       }
       break;
     case "error":

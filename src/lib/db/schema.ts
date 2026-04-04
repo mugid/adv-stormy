@@ -71,6 +71,8 @@ export const boards = pgTable("boards", {
   ownerId: text("owner_id")
     .notNull()
     .references(() => user.id, { onDelete: "cascade" }),
+  /** Excalidraw document from `serializeAsJSON(..., "database")` */
+  sceneJson: text("scene_json"),
   yDocState: bytea("y_doc_state"),
   thumbnail: text("thumbnail"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
