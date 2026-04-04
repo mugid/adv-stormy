@@ -31,17 +31,6 @@ declare module "y-websocket" {
   }
 }
 
-declare module "y-websocket/bin/utils" {
-  import type { IncomingMessage } from "http";
-  import type { WebSocket } from "ws";
-
-  export function setupWSConnection(
-    conn: WebSocket,
-    req: IncomingMessage,
-    options?: { docName?: string; gc?: boolean }
-  ): void;
-}
-
 declare module "y-protocols/awareness" {
   import * as Y from "yjs";
 
