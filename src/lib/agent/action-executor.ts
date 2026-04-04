@@ -2,10 +2,9 @@ import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import {
   convertToExcalidrawElements,
-  restoreElements,
+  mutateElement,
 } from "@excalidraw/excalidraw";
 import type { ExcalidrawElementSkeleton } from "@excalidraw/excalidraw/data/transform";
-import { bindLinearElement } from "@/lib/excalidraw/bind-linear";
 import { nanoid } from "nanoid";
 import type { AgentAction } from "./types";
 
@@ -160,14 +159,33 @@ function executeMoveShapes(
   api.updateScene({ elements: updated as ExcalidrawElement[] });
 }
 
+/** Match Excalidraw's isBindableElement — bound labels on shapes are not bindable. */
 function isAgentBindableEndpoint(el: ExcalidrawElement): boolean {
+  if (el.isDeleted) return false;
   const t = el.type;
-  return (
-    t === "rectangle" ||
-    t === "ellipse" ||
-    t === "diamond" ||
-    t === "text"
-  );
+  if (t === "rectangle" || t === "ellipse" || t === "diamond") return true;
+  if (t === "text") {
+    return !("containerId" in el && el.containerId != null && el.containerId !== "");
+  }
+  return t === "image" || t === "iframe" || t === "embeddable" || t === "frame" || t === "magicframe";
+}
+
+function attachArrowBinding(
+  arrow: ExcalidrawElement,
+  target: ExcalidrawElement,
+  startOrEnd: "start" | "end"
+) {
+  if (arrow.type !== "arrow") return;
+  const binding = { elementId: target.id, focus: 0.5 as number, gap: 8 as number };
+  mutateElement(arrow, {
+    [startOrEnd === "start" ? "startBinding" : "endBinding"]: binding,
+  }, false);
+
+  const existing = target.boundElements ?? [];
+  if (existing.some((b) => b.id === arrow.id)) return;
+  mutateElement(target, {
+    boundElements: [...existing, { id: arrow.id, type: "arrow" }],
+  }, false);
 }
 
 function executeCreateConnection(
@@ -192,6 +210,8 @@ function executeCreateConnection(
     id: arrowId,
     x: fromCx,
     y: fromCy,
+    strokeColor: "#1e1e1e",
+    endArrowhead: "arrow",
     points: [
       [0, 0],
       [dx, dy],
@@ -204,19 +224,13 @@ function executeCreateConnection(
   });
   const merged = [...scene, ...newParts];
 
-  const restored = restoreElements(
-    merged as Parameters<typeof restoreElements>[0],
-    null,
-    {}
-  );
-
   const canBind =
     isAgentBindableEndpoint(from) && isAgentBindableEndpoint(to);
 
   if (canBind) {
-    const arrow = restored.find((el) => el.id === arrowId);
-    const fromEl = restored.find((el) => el.id === from.id);
-    const toEl = restored.find((el) => el.id === to.id);
+    const arrow = merged.find((el) => el.id === arrowId);
+    const fromEl = merged.find((el) => el.id === from.id);
+    const toEl = merged.find((el) => el.id === to.id);
 
     if (
       arrow &&
@@ -225,26 +239,13 @@ function executeCreateConnection(
       arrow.type === "arrow" &&
       !arrow.isDeleted
     ) {
-      const elementsMap = new Map(restored.map((e) => [e.id, e])) as Parameters<
-        typeof bindLinearElement
-      >[3];
-
-      bindLinearElement(
-        arrow as Parameters<typeof bindLinearElement>[0],
-        fromEl as Parameters<typeof bindLinearElement>[1],
-        "start",
-        elementsMap
-      );
-      bindLinearElement(
-        arrow as Parameters<typeof bindLinearElement>[0],
-        toEl as Parameters<typeof bindLinearElement>[1],
-        "end",
-        elementsMap
-      );
+      attachArrowBinding(arrow, fromEl, "start");
+      attachArrowBinding(arrow, toEl, "end");
     }
   }
 
-  api.updateScene({ elements: restored as ExcalidrawElement[] });
+  api.updateScene({ elements: merged as ExcalidrawElement[] });
+  api.refresh();
 }
 
 function executeGroupShapes(
