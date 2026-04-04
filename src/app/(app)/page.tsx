@@ -99,7 +99,7 @@ export default function DashboardPage() {
         {loading ? (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
             {Array.from({ length: 4 }).map((_, i) => (
-              <Skeleton key={i} className="aspect-[4/3] rounded-lg" />
+              <Skeleton key={i} className="aspect-4/3 rounded-lg" />
             ))}
           </div>
         ) : boards.length === 0 ? (
