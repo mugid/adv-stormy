@@ -8,16 +8,20 @@ import {
   useMemo,
 } from "react";
 import { CaptureUpdateAction } from "@excalidraw/excalidraw";
-import type {
-  Collaborator,
-  ExcalidrawImperativeAPI,
-  SocketId,
-} from "@excalidraw/excalidraw/types";
+import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import * as Y from "yjs";
 import type { Transaction } from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import type { YjsSceneFileEntry } from "@/lib/excalidraw/board-scene-files";
+import { awarenessPeersToCollaborators, stableColorForUserName } from "./yjs-awareness";
+import {
+  YDOC_ELEMENTS,
+  YDOC_SCENE_FILES,
+  appendYElementsFromExcalidraw,
+  pushYElementsToExcalidraw,
+  replaceYElementsFromExcalidraw,
+} from "./yjs-board-bridge";
 
 export type { YjsSceneFileEntry };
 
@@ -32,55 +36,10 @@ type UseYjsOptions = {
   enabled?: boolean;
 };
 
-function hslToCollaboratorColors(hsl: string): Collaborator["color"] {
-  return {
-    stroke: hsl,
-    background: hsl,
-  };
-}
-
-function awarenessToCollaborators(
-  awareness: WebsocketProvider["awareness"]
-): Map<SocketId, Collaborator> {
-  const map = new Map<SocketId, Collaborator>();
-  const states = awareness.getStates() as Map<
-    number,
-    {
-      user?: { name?: string; color?: string };
-      pointer?: { x: number; y: number; tool?: "pointer" | "laser" };
-    }
-  >;
-  states.forEach((payload, clientId) => {
-    if (clientId === awareness.clientID) return;
-    const name = payload.user?.name ?? "Collaborator";
-    const hsl = payload.user?.color ?? "hsl(220, 70%, 50%)";
-    const hasPtr =
-      payload.pointer &&
-      Number.isFinite(payload.pointer.x) &&
-      Number.isFinite(payload.pointer.y);
-    const c = {
-      username: name,
-      color: hslToCollaboratorColors(hsl),
-      socketId: String(clientId) as SocketId,
-      ...(hasPtr
-        ? {
-            pointer: {
-              x: payload.pointer!.x,
-              y: payload.pointer!.y,
-              tool: (payload.pointer!.tool ?? "pointer") as "pointer" | "laser",
-            },
-          }
-        : {}),
-    } satisfies Collaborator;
-    map.set(String(clientId) as SocketId, c);
-  });
-  return map;
-}
-
 async function fetchUrlToBinaryFile(
   fileId: string,
   url: string,
-  mimeType: string
+  mimeType: string,
 ) {
   const res = await fetch(url, { mode: "cors" });
   if (!res.ok) throw new Error(`fetch ${res.status}`);
@@ -101,10 +60,14 @@ async function fetchUrlToBinaryFile(
 
 type BinaryFilePayload = Awaited<ReturnType<typeof fetchUrlToBinaryFile>>;
 
+/**
+ * Realtime board sync: one Y.Doc per room, replicated over y-websocket.
+ * See `ARCHITECTURE.md` in this folder for the full data flow.
+ */
 export function useYjsStore(
   roomId: string,
   api: ExcalidrawImperativeAPI | null,
-  options?: UseYjsOptions
+  options?: UseYjsOptions,
 ) {
   const userName = options?.userName;
   const enabled = options?.enabled ?? true;
@@ -113,22 +76,19 @@ export function useYjsStore(
   const docRef = useRef<Y.Doc | null>(null);
   const providerRef = useRef<WebsocketProvider | null>(null);
   const apiRef = useRef<ExcalidrawImperativeAPI | null>(null);
-  /**
-   * True while we are applying remote Y data into Excalidraw via updateScene/addFiles.
-   * While true, onElementsChange DROPS calls — the elements came from our own
-   * updateScene and must NOT be echoed back into Yjs (that creates a ping-pong loop).
-   */
+  /** When true, ignore Excalidraw onChange echo (remote updateScene / addFiles). */
   const applyingRemoteRef = useRef(false);
   const applyingSceneFilesRef = useRef(false);
 
   const pushCollaborators = useCallback(
     (provider: WebsocketProvider | null, excalidrawApi: ExcalidrawImperativeAPI) => {
       if (!provider) return;
-      const collaborators = awarenessToCollaborators(provider.awareness);
       applyingRemoteRef.current = true;
       try {
         excalidrawApi.updateScene({
-          appState: { collaborators },
+          appState: {
+            collaborators: awarenessPeersToCollaborators(provider.awareness),
+          },
           captureUpdate: CaptureUpdateAction.NEVER,
         });
       } catch {
@@ -136,7 +96,7 @@ export function useYjsStore(
       }
       applyingRemoteRef.current = false;
     },
-    []
+    [],
   );
 
   const applySceneFilesFromY = useCallback(
@@ -148,11 +108,11 @@ export function useYjsStore(
         const e = val as YjsSceneFileEntry | undefined;
         if (!e?.url || existing[fileId]) return;
         batch.push(
-          fetchUrlToBinaryFile(fileId, e.url, e.mimeType).catch(() => null)
+          fetchUrlToBinaryFile(fileId, e.url, e.mimeType).catch(() => null),
         );
       });
       const resolved = (await Promise.all(batch)).filter(
-        (x): x is BinaryFilePayload => x != null
+        (x): x is BinaryFilePayload => x != null,
       );
       if (resolved.length) {
         applyingRemoteRef.current = true;
@@ -165,32 +125,21 @@ export function useYjsStore(
       }
       applyingSceneFilesRef.current = false;
     },
-    []
+    [],
   );
 
-  /**
-   * Called from Board.tsx onChange for every local edit.
-   * MUST NOT run when we are applying remote data (applyingRemoteRef),
-   * otherwise we echo the remote elements back into Yjs → infinite loop.
-   */
   const onElementsChange = useCallback(
     (elements: readonly ExcalidrawElement[]) => {
       if (applyingRemoteRef.current) return;
       const doc = docRef.current;
       if (!doc) return;
-      const yEls = doc.getArray<Y.Map<unknown>>("elements");
-      doc.transact(() => {
-        yEls.delete(0, yEls.length);
-        for (const el of elements) {
-          const yEl = new Y.Map<unknown>();
-          for (const [k, v] of Object.entries(el)) {
-            yEl.set(k, v);
-          }
-          yEls.push([yEl]);
-        }
-      });
+      replaceYElementsFromExcalidraw(
+        doc,
+        doc.getArray<Y.Map<unknown>>(YDOC_ELEMENTS),
+        elements,
+      );
     },
-    []
+    [],
   );
 
   const onSceneFilesChange = useCallback(
@@ -203,18 +152,19 @@ export function useYjsStore(
       ) {
         return;
       }
-      const yFiles = doc.getMap<unknown>("sceneFiles");
+      const yFiles = doc.getMap<unknown>(YDOC_SCENE_FILES);
       doc.transact(() => {
         for (const [id, entry] of Object.entries(patch)) {
           if (!entry?.url) continue;
           const cur = yFiles.get(id) as YjsSceneFileEntry | undefined;
-          if (cur?.url === entry.url && cur?.mimeType === entry.mimeType)
+          if (cur?.url === entry.url && cur?.mimeType === entry.mimeType) {
             continue;
+          }
           yFiles.set(id, { url: entry.url, mimeType: entry.mimeType });
         }
       });
     },
-    []
+    [],
   );
 
   const handlePointerUpdate = useCallback(
@@ -231,7 +181,7 @@ export function useYjsStore(
         button: payload.button,
       });
     },
-    []
+    [],
   );
 
   useLayoutEffect(() => {
@@ -249,7 +199,6 @@ export function useYjsStore(
     const doc = new Y.Doc();
     docRef.current = doc;
     const wsUrl = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:1234";
-
     const provider = new WebsocketProvider(wsUrl, roomId, doc, {
       connect: true,
     });
@@ -258,91 +207,55 @@ export function useYjsStore(
     if (userName) {
       provider.awareness.setLocalStateField("user", {
         name: userName,
-        color: generateUserColor(userName),
+        color: stableColorForUserName(userName),
       });
     }
 
-    const yElements = doc.getArray<Y.Map<unknown>>("elements");
-    const ySceneFiles = doc.getMap<unknown>("sceneFiles");
+    const yElements = doc.getArray<Y.Map<unknown>>(YDOC_ELEMENTS);
+    const ySceneFiles = doc.getMap<unknown>(YDOC_SCENE_FILES);
 
-    /**
-     * Apply remote Y elements into Excalidraw.
-     * Only called when we know the update came from the WebSocket provider.
-     */
-    const flushRemoteElements = () => {
+    const flushElementsFromRemoteWire = () => {
       const drawApi = apiRef.current;
       if (!drawApi) return;
-      if (yElements.length === 0) return;
-      const elements: ExcalidrawElement[] = [];
-      yElements.forEach((yEl) => {
-        if (yEl) elements.push(yEl.toJSON() as ExcalidrawElement);
-      });
-      applyingRemoteRef.current = true;
-      try {
-        drawApi.updateScene({
-          elements,
-          captureUpdate: CaptureUpdateAction.NEVER,
-        });
-      } catch {
-        /* race on init */
-      }
-      applyingRemoteRef.current = false;
+      pushYElementsToExcalidraw(yElements, drawApi, applyingRemoteRef);
     };
 
-    /**
-     * doc 'update' fires after each transaction with (update, origin, doc, transaction).
-     * When origin === provider the update came from the WebSocket (remote peer).
-     * This is the only case where we need to push Y state into Excalidraw.
-     */
-    const onDocUpdate = (
-      _update: Uint8Array,
-      origin: unknown,
-    ) => {
+    const onDocUpdate = (_u: Uint8Array, origin: unknown) => {
       if (origin !== provider) return;
-      flushRemoteElements();
+      flushElementsFromRemoteWire();
     };
     doc.on("update", onDocUpdate);
 
-    const onYFiles = (_event: unknown, transaction: Transaction) => {
-      if (transaction.local) return;
+    const onRemoteSceneFiles = (_e: unknown, tx: Transaction) => {
+      if (tx.local) return;
       const drawApi = apiRef.current;
       if (drawApi) void applySceneFilesFromY(ySceneFiles, drawApi);
     };
-    ySceneFiles.observe(onYFiles);
-    {
-      const drawApi = apiRef.current;
-      if (drawApi) void applySceneFilesFromY(ySceneFiles, drawApi);
-    }
+    ySceneFiles.observe(onRemoteSceneFiles);
 
     const onAwareness = () => {
       const drawApi = apiRef.current;
       if (drawApi) pushCollaborators(provider, drawApi);
     };
     provider.awareness.on("update", onAwareness);
-    {
-      const drawApi = apiRef.current;
-      if (drawApi) pushCollaborators(provider, drawApi);
-    }
 
-    const seedYjsFromExcalidrawIfEmpty = () => {
+    const tryPullInitialFiles = () => {
       const drawApi = apiRef.current;
-      if (!drawApi || yElements.length > 0) return;
-      const elements = drawApi.getSceneElements();
-      doc.transact(() => {
-        for (const el of elements) {
-          const yEl = new Y.Map<unknown>();
-          for (const [k, v] of Object.entries(el)) {
-            yEl.set(k, v);
-          }
-          yElements.push([yEl]);
-        }
-      });
+      if (drawApi) void applySceneFilesFromY(ySceneFiles, drawApi);
     };
+    tryPullInitialFiles();
+    onAwareness();
 
-    const onSync = (...args: unknown[]) => {
-      if (args[0] === true) seedYjsFromExcalidrawIfEmpty();
+    const afterFirstSync = (...args: unknown[]) => {
+      if (args[0] !== true) return;
+      const drawApi = apiRef.current;
+      appendYElementsFromExcalidraw(
+        doc,
+        yElements,
+        drawApi ? drawApi.getSceneElements() : [],
+      );
     };
-    provider.on("sync", onSync);
+    provider.on("sync", afterFirstSync);
 
     const onStatus = (event: unknown) => {
       const { status } = event as { status: string };
@@ -367,9 +280,9 @@ export function useYjsStore(
       providerRef.current = null;
       provider.awareness.off("update", onAwareness);
       provider.off("status", onStatus);
-      provider.off("sync", onSync);
+      provider.off("sync", afterFirstSync);
       doc.off("update", onDocUpdate);
-      ySceneFiles.unobserve(onYFiles);
+      ySceneFiles.unobserve(onRemoteSceneFiles);
       provider.disconnect();
       provider.destroy();
       doc.destroy();
@@ -377,24 +290,27 @@ export function useYjsStore(
     };
   }, [roomId, userName, enabled, applySceneFilesFromY, pushCollaborators]);
 
+  /*
+   * Excalidraw often mounts after the websocket has already applied the first
+   * server update. Reconcile once api exists: pull remote elements (and files)
+   * into the canvas, or seed Y from the restored scene when Y is still empty.
+   */
   useLayoutEffect(() => {
     if (!enabled || !api) return;
     const doc = docRef.current;
     if (!doc) return;
-    const yElements = doc.getArray<Y.Map<unknown>>("elements");
-    if (yElements.length > 0) return;
-    const elements = api.getSceneElements();
-    if (elements.length === 0) return;
-    doc.transact(() => {
-      for (const el of elements) {
-        const yEl = new Y.Map<unknown>();
-        for (const [k, v] of Object.entries(el)) {
-          yEl.set(k, v);
-        }
-        yElements.push([yEl]);
-      }
-    });
-  }, [api, enabled, roomId]);
+    const yElements = doc.getArray<Y.Map<unknown>>(YDOC_ELEMENTS);
+    const ySceneFiles = doc.getMap<unknown>(YDOC_SCENE_FILES);
+
+    void applySceneFilesFromY(ySceneFiles, api);
+
+    if (yElements.length > 0) {
+      pushYElementsToExcalidraw(yElements, api, applyingRemoteRef);
+      return;
+    }
+
+    appendYElementsFromExcalidraw(doc, yElements, api.getSceneElements());
+  }, [api, enabled, roomId, applySceneFilesFromY]);
 
   return useMemo(
     () => ({
@@ -403,15 +319,6 @@ export function useYjsStore(
       onSceneFilesChange,
       handlePointerUpdate,
     }),
-    [state, onElementsChange, onSceneFilesChange, handlePointerUpdate]
+    [state, onElementsChange, onSceneFilesChange, handlePointerUpdate],
   );
-}
-
-function generateUserColor(name: string): string {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = name.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  const hue = Math.abs(hash) % 360;
-  return `hsl(${hue}, 70%, 50%)`;
 }
