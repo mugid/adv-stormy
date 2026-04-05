@@ -6,7 +6,9 @@ import {
   Room,
   RoomEvent,
   Track,
+  TrackEvent,
   type Participant,
+  type RemoteParticipant,
   type RemoteTrack,
   type RemoteTrackPublication,
 } from "livekit-client";
@@ -34,6 +36,20 @@ export interface BoardCallBarProps {
   lastAssistantText: string | null;
 }
 
+function ensureAudioMount(): HTMLDivElement {
+  const div = document.createElement("div");
+  div.className = "sr-only";
+  div.setAttribute("aria-hidden", "true");
+  document.body.appendChild(div);
+  return div;
+}
+
+function removeAudioMount(mount: HTMLDivElement | null) {
+  if (!mount || !mount.parentNode) return;
+  mount.replaceChildren();
+  mount.remove();
+}
+
 export function BoardCallBar({
   boardId,
   canEdit,
@@ -46,13 +62,15 @@ export function BoardCallBar({
   const [micOn, setMicOn] = useState(true);
   const [aiListen, setAiListen] = useState(false);
   const [voiceReply, setVoiceReply] = useState(false);
+  const [soundNeedsGesture, setSoundNeedsGesture] = useState(false);
   const [lines, setLines] = useState<{ role: "you" | "status"; text: string }[]>(
     []
   );
 
   const roomRef = useRef<Room | null>(null);
-  /** Holds detached `<audio>` elements for each remote mic track. */
-  const remoteAudioContainerRef = useRef<HTMLDivElement | null>(null);
+  /** Appended to `document.body` while in a call — avoids missing audio when React ref timing lags events. */
+  const audioMountRef = useRef<HTMLDivElement | null>(null);
+  const attachedRemoteAudioSidsRef = useRef(new Set<string>());
   const spokenRef = useRef<string | null>(null);
   const agentBusyRef = useRef(agentBusy);
   agentBusyRef.current = agentBusy;
@@ -76,6 +94,30 @@ export function BoardCallBar({
     [boardId]
   );
 
+  const tryResumeAllRemoteAudio = useCallback(() => {
+    const room = roomRef.current;
+    const mount = audioMountRef.current;
+    if (!room || !mount) return;
+    setSoundNeedsGesture(false);
+    void room.startAudio().catch(() => {
+      pushLine(
+        "status",
+        "Still blocked — try again after clicking, or check browser site permissions."
+      );
+    });
+    mount.querySelectorAll("audio").forEach((el) => {
+      el.muted = false;
+      void el.play().catch(() => setSoundNeedsGesture(true));
+    });
+  }, [pushLine]);
+
+  const tearDownCallMedia = useCallback(() => {
+    attachedRemoteAudioSidsRef.current.clear();
+    removeAudioMount(audioMountRef.current);
+    audioMountRef.current = null;
+    setSoundNeedsGesture(false);
+  }, []);
+
   const disconnect = useCallback(async () => {
     const room = roomRef.current;
     roomRef.current = null;
@@ -86,17 +128,15 @@ export function BoardCallBar({
         /* ignore */
       }
     }
-    const host = remoteAudioContainerRef.current;
-    if (host) {
-      host.replaceChildren();
-    }
+    tearDownCallMedia();
     setStatus("idle");
     setAiListen(false);
     await logCallEvent("call_leave");
-  }, [logCallEvent]);
+  }, [logCallEvent, tearDownCallMedia]);
 
   useEffect(() => {
-    const audioContainer = remoteAudioContainerRef.current;
+    const attachedSids = attachedRemoteAudioSidsRef;
+    const audioMount = audioMountRef;
     return () => {
       const room = roomRef.current;
       roomRef.current = null;
@@ -106,13 +146,15 @@ export function BoardCallBar({
         } catch {
           /* ignore */
         }
-        audioContainer?.replaceChildren();
         void fetch(`/api/boards/${boardId}/call-events`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ kind: "call_leave", payload: { reason: "unmount" } }),
         }).catch(() => {});
       }
+      attachedSids.current.clear();
+      removeAudioMount(audioMount.current);
+      audioMount.current = null;
     };
   }, [boardId]);
 
@@ -120,7 +162,11 @@ export function BoardCallBar({
     if (!canEdit) return;
     setError(null);
     setStatus("connecting");
+    tearDownCallMedia();
+
     try {
+      audioMountRef.current = ensureAudioMount();
+
       const res = await fetch(`/api/boards/${boardId}/call-token`);
       const data = (await res.json()) as {
         error?: string;
@@ -134,12 +180,68 @@ export function BoardCallBar({
       const { url, token } = data;
       if (!url || !token) throw new Error("Invalid token response");
 
+      const attachRemoteAudio = (
+        track: RemoteTrack,
+        participant: RemoteParticipant
+      ) => {
+        if (track.kind !== Track.Kind.Audio) return;
+        const sid = track.sid ?? "";
+        if (!sid || attachedRemoteAudioSidsRef.current.has(sid)) return;
+        attachedRemoteAudioSidsRef.current.add(sid);
+
+        const host = audioMountRef.current;
+        if (!host) {
+          attachedRemoteAudioSidsRef.current.delete(sid);
+          return;
+        }
+
+        const audioEl = track.attach() as HTMLAudioElement;
+        audioEl.volume = 1;
+        audioEl.muted = false;
+        audioEl.autoplay = true;
+        audioEl.setAttribute("playsinline", "true");
+        audioEl.dataset.lkIdentity = participant.identity;
+        host.appendChild(audioEl);
+
+        track.on(TrackEvent.AudioPlaybackFailed, () => {
+          setSoundNeedsGesture(true);
+          pushLine(
+            "status",
+            "Browser blocked remote audio autoplay — tap “Enable sound”."
+          );
+        });
+
+        void audioEl.play().catch(() => setSoundNeedsGesture(true));
+      };
+
+      const syncRemoteParticipantAudio = (participant: RemoteParticipant) => {
+        participant.audioTrackPublications.forEach((pub) => {
+          const t = pub.track;
+          if (t && t.kind === Track.Kind.Audio) {
+            attachRemoteAudio(t, participant);
+          }
+        });
+      };
+
+      const scheduleResync = (room: Room) => {
+        const run = () => {
+          room.remoteParticipants.forEach((p) => syncRemoteParticipantAudio(p));
+        };
+        queueMicrotask(run);
+        requestAnimationFrame(run);
+        window.setTimeout(run, 350);
+        window.setTimeout(run, 1500);
+      };
+
       const room = new Room({
-        adaptiveStream: true,
-        dynacast: true,
+        adaptiveStream: false,
+        dynacast: false,
+        disconnectOnPageLeave: true,
       });
+
       room.on(RoomEvent.Disconnected, () => {
         roomRef.current = null;
+        tearDownCallMedia();
         setStatus("idle");
         setAiListen(false);
         pushLine("status", "Disconnected from call");
@@ -148,55 +250,61 @@ export function BoardCallBar({
         pushLine("status", "Reconnecting…");
       });
 
-      const onRemoteTrackSubscribed = (
-        track: RemoteTrack,
-        _publication: RemoteTrackPublication,
-        participant: Participant
-      ) => {
-        if (!isRemoteParticipant(participant)) return;
-        if (track.kind !== Track.Kind.Audio) return;
-        const host = remoteAudioContainerRef.current;
-        if (!host) return;
-        const audioEl = track.attach();
-        audioEl.dataset.lkIdentity = participant.identity;
-        audioEl.setAttribute("playsinline", "true");
-        audioEl.autoplay = true;
-        host.appendChild(audioEl);
-        void audioEl.play().catch(() => {
-          pushLine(
-            "status",
-            "Could not auto-play remote audio — tap the page or check browser permissions."
-          );
-        });
-      };
+      room.on(
+        RoomEvent.TrackSubscribed,
+        (track: RemoteTrack, _pub: RemoteTrackPublication, participant: Participant) => {
+          if (!isRemoteParticipant(participant)) return;
+          if (track.kind !== Track.Kind.Audio) return;
+          attachRemoteAudio(track, participant);
+        }
+      );
 
-      const onRemoteTrackUnsubscribed = (track: RemoteTrack) => {
+      room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
+        const sid = track.sid ?? "";
+        if (sid) attachedRemoteAudioSidsRef.current.delete(sid);
         track.detach();
-      };
+      });
 
-      room
-        .on(RoomEvent.TrackSubscribed, onRemoteTrackSubscribed)
-        .on(RoomEvent.TrackUnsubscribed, onRemoteTrackUnsubscribed);
-
-      await room.connect(url, token);
-      await room.localParticipant.setMicrophoneEnabled(micOn);
-      await room.startAudio().catch(() => {
+      room.on(RoomEvent.ParticipantConnected, (participant: RemoteParticipant) => {
+        syncRemoteParticipantAudio(participant);
         pushLine(
           "status",
-          "Allow audio playback in the browser to hear other participants."
+          `${participant.name || participant.identity} is in the call`
         );
       });
+
+      room.on(
+        RoomEvent.TrackSubscriptionFailed,
+        (_sid: string, _participant: RemoteParticipant, reason?: unknown) => {
+          pushLine("status", `Could not subscribe to remote audio (${String(reason ?? "unknown")})`);
+        }
+      );
+
+      await room.connect(url, token, { autoSubscribe: true });
+      await room.localParticipant.setMicrophoneEnabled(micOn);
+      await room.startAudio().catch(() => {
+        setSoundNeedsGesture(true);
+        pushLine(
+          "status",
+          "Tap “Enable sound” if you cannot hear other participants."
+        );
+      });
+
+      room.remoteParticipants.forEach((p) => syncRemoteParticipantAudio(p));
+      scheduleResync(room);
+
       roomRef.current = room;
       setStatus("connected");
       pushLine("status", "Joined voice room");
       void logCallEvent("call_join", { room: room.name });
     } catch (e) {
+      tearDownCallMedia();
       const msg = e instanceof Error ? e.message : "Could not join call";
       setError(msg);
       setStatus("error");
       void logCallEvent("call_error", { message: msg });
     }
-  }, [boardId, canEdit, logCallEvent, micOn, pushLine]);
+  }, [boardId, canEdit, logCallEvent, micOn, pushLine, tearDownCallMedia]);
 
   const toggleMic = useCallback(async () => {
     const next = !micOn;
@@ -248,9 +356,7 @@ export function BoardCallBar({
   if (!canEdit) return null;
 
   return (
-    <>
-      <div ref={remoteAudioContainerRef} className="sr-only" aria-hidden />
-      <div className="absolute bottom-4 right-4 z-50 flex max-w-sm flex-col gap-2 rounded-xl border border-border bg-background/95 p-3 text-sm shadow-lg backdrop-blur-sm">
+    <div className="absolute bottom-4 right-4 z-50 flex max-w-sm flex-col gap-2 rounded-xl border border-border bg-background/95 p-3 text-sm shadow-lg backdrop-blur-sm">
       <div className="flex items-center justify-between gap-2">
         <span className="font-medium text-foreground">Board call</span>
         {status === "connected" ? (
@@ -294,6 +400,18 @@ export function BoardCallBar({
 
       {status === "connected" ? (
         <div className="flex flex-col gap-2 border-t border-border pt-2">
+          {soundNeedsGesture ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="w-full gap-1 text-xs"
+              onClick={() => tryResumeAllRemoteAudio()}
+            >
+              <Volume2 className="h-3.5 w-3.5" />
+              Enable sound (hear others)
+            </Button>
+          ) : null}
           <div className="flex flex-wrap gap-2">
             <Button
               type="button"
@@ -362,7 +480,6 @@ export function BoardCallBar({
           ))}
         </div>
       )}
-      </div>
-    </>
+    </div>
   );
 }
