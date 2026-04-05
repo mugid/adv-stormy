@@ -4,6 +4,10 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  yjs: 14.0.0-8
+  y-protocols: npm:@y/protocols@1.0.6-1
+
 importers:
 
   .:
@@ -73,10 +77,10 @@ importers:
         version: 1.4.0
       y-websocket:
         specifier: ^3.0.0
-        version: 3.0.0(yjs@13.6.30)
+        version: 3.0.0(yjs@14.0.0-8)
       yjs:
-        specifier: ^13.6.30
-        version: 13.6.30
+        specifier: 14.0.0-8
+        version: 14.0.0-8
     devDependencies:
       '@tailwindcss/postcss':
         specifier: ^4
@@ -1874,6 +1878,12 @@ packages:
     resolution: {integrity: sha512-lrW200hZdbfRtztbygyaq/6jP6AKE8qQN2KvPcJ+x7wiD038YtnYtZ82IMNJ69GJibV7bwL3y9FgK+5w/pYt6g==}
     cpu: [x64]
     os: [win32]
+
+  '@y/protocols@1.0.6-1':
+    resolution: {integrity: sha512-6hyVR4Azg+JVqeyCkPQMsg9BMpB7fgAldsIDwb5EqJTPLXkQuk/mqK/j0rvIZUuPvJjlYSDBIOQWNsy92iXQsQ==}
+    engines: {node: '>=16.0.0', npm: '>=8.0.0'}
+    peerDependencies:
+      yjs: 14.0.0-8
 
   '@y/protocols@1.0.6-rc.1':
     resolution: {integrity: sha512-e/qs7hXcLk/SeNitxMXv2ymozyWFTULwbJEi7cAf/K/iXw9nGwGXHrR5TNluQ/bMwOX1cwuUT0hjEojkfH0gsA==}
@@ -4790,17 +4800,11 @@ packages:
     resolution: {integrity: sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ==}
     engines: {node: '>=0.4'}
 
-  y-protocols@1.0.7:
-    resolution: {integrity: sha512-YSVsLoXxO67J6eE/nV4AtFtT3QEotZf5sK5BHxFBXso7VDUT3Tx07IfA6hsu5Q5OmBdMkQVmFZ9QOA7fikWvnw==}
-    engines: {node: '>=16.0.0', npm: '>=8.0.0'}
-    peerDependencies:
-      yjs: ^13.0.0
-
   y-websocket@3.0.0:
     resolution: {integrity: sha512-mUHy7AzkOZ834T/7piqtlA8Yk6AchqKqcrCXjKW8J1w2lPtRDjz8W5/CvXz9higKAHgKRKqpI3T33YkRFLkPtg==}
     engines: {node: '>=16.0.0', npm: '>=8.0.0'}
     peerDependencies:
-      yjs: ^13.5.6
+      yjs: 14.0.0-8
 
   y18n@5.0.8:
     resolution: {integrity: sha512-0pfFzegeDWJHJIAmTLRP2DwHjdF5s7jo9tuztdQxAhINCdvS+3nGINqPd00AphqJR/0LhANUS6/+7SCb98YOfA==}
@@ -4817,12 +4821,8 @@ packages:
     resolution: {integrity: sha512-7dSzzRQ++CKnNI/krKnYRV7JKKPUXMEh61soaHKg9mrWEhzFWhFnxPxGl+69cD1Ou63C13NUPCnmIcrvqCuM6w==}
     engines: {node: '>=12'}
 
-  yjs@13.6.30:
-    resolution: {integrity: sha512-vv/9h42eCMC81ZHDFswuu/MKzkl/vyq1BhaNGfHyOonwlG4CJbQF4oiBBJPvfdeCt/PlVDWh7Nov9D34YY09uQ==}
-    engines: {node: '>=16.0.0', npm: '>=8.0.0'}
-
-  yjs@14.0.0-16:
-    resolution: {integrity: sha512-n7jMrQz4pgU/NFnf4qY53K2adR/fu6ViQ79qVIw6Og+BtuDs1hx3DjOi3iREVnA6tsxQXXVG3gvG0I2kpmAwoQ==}
+  yjs@14.0.0-8:
+    resolution: {integrity: sha512-qK6gA8RgYTWqNs7bQjsc1zksRmb7DWFcJepOSfvawHjJpEh7qC/vkrRY1YHBNN6CPAAYSplPm0jaOXJWgLzyNQ==}
     engines: {node: '>=16.0.0', npm: '>=8.0.0'}
 
   yocto-queue@0.1.0:
@@ -6400,6 +6400,11 @@ snapshots:
   '@unrs/resolver-binding-win32-x64-msvc@1.11.1':
     optional: true
 
+  '@y/protocols@1.0.6-1(yjs@14.0.0-8)':
+    dependencies:
+      lib0: 0.2.117
+      yjs: 14.0.0-8
+
   '@y/protocols@1.0.6-rc.1(@y/y@14.0.0-rc.7)':
     dependencies:
       '@y/y': 14.0.0-rc.7
@@ -6410,7 +6415,7 @@ snapshots:
       '@y/protocols': 1.0.6-rc.1(@y/y@14.0.0-rc.7)
       lib0: 0.2.117
       ws: 6.2.3
-      yjs: 14.0.0-16
+      yjs: 14.0.0-8
     transitivePeerDependencies:
       - '@y/y'
       - bufferutil
@@ -9617,16 +9622,11 @@ snapshots:
 
   xtend@4.0.2: {}
 
-  y-protocols@1.0.7(yjs@13.6.30):
+  y-websocket@3.0.0(yjs@14.0.0-8):
     dependencies:
       lib0: 0.2.117
-      yjs: 13.6.30
-
-  y-websocket@3.0.0(yjs@13.6.30):
-    dependencies:
-      lib0: 0.2.117
-      y-protocols: 1.0.7(yjs@13.6.30)
-      yjs: 13.6.30
+      y-protocols: '@y/protocols@1.0.6-1(yjs@14.0.0-8)'
+      yjs: 14.0.0-8
 
   y18n@5.0.8: {}
 
@@ -9644,11 +9644,7 @@ snapshots:
       y18n: 5.0.8
       yargs-parser: 21.1.1
 
-  yjs@13.6.30:
-    dependencies:
-      lib0: 0.2.117
-
-  yjs@14.0.0-16:
+  yjs@14.0.0-8:
     dependencies:
       lib0: 0.2.117
 
