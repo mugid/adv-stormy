@@ -1,7 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Room, RoomEvent } from "livekit-client";
+import {
+  isRemoteParticipant,
+  Room,
+  RoomEvent,
+  Track,
+  type Participant,
+  type RemoteTrack,
+  type RemoteTrackPublication,
+} from "livekit-client";
 import { Button } from "@/components/ui/button";
 import { useBrowserStt } from "@/lib/call/use-browser-stt";
 import {
@@ -43,6 +51,8 @@ export function BoardCallBar({
   );
 
   const roomRef = useRef<Room | null>(null);
+  /** Holds detached `<audio>` elements for each remote mic track. */
+  const remoteAudioContainerRef = useRef<HTMLDivElement | null>(null);
   const spokenRef = useRef<string | null>(null);
   const agentBusyRef = useRef(agentBusy);
   agentBusyRef.current = agentBusy;
@@ -76,12 +86,17 @@ export function BoardCallBar({
         /* ignore */
       }
     }
+    const host = remoteAudioContainerRef.current;
+    if (host) {
+      host.replaceChildren();
+    }
     setStatus("idle");
     setAiListen(false);
     await logCallEvent("call_leave");
   }, [logCallEvent]);
 
   useEffect(() => {
+    const audioContainer = remoteAudioContainerRef.current;
     return () => {
       const room = roomRef.current;
       roomRef.current = null;
@@ -91,6 +106,7 @@ export function BoardCallBar({
         } catch {
           /* ignore */
         }
+        audioContainer?.replaceChildren();
         void fetch(`/api/boards/${boardId}/call-events`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -132,8 +148,44 @@ export function BoardCallBar({
         pushLine("status", "Reconnecting…");
       });
 
+      const onRemoteTrackSubscribed = (
+        track: RemoteTrack,
+        _publication: RemoteTrackPublication,
+        participant: Participant
+      ) => {
+        if (!isRemoteParticipant(participant)) return;
+        if (track.kind !== Track.Kind.Audio) return;
+        const host = remoteAudioContainerRef.current;
+        if (!host) return;
+        const audioEl = track.attach();
+        audioEl.dataset.lkIdentity = participant.identity;
+        audioEl.setAttribute("playsinline", "true");
+        audioEl.autoplay = true;
+        host.appendChild(audioEl);
+        void audioEl.play().catch(() => {
+          pushLine(
+            "status",
+            "Could not auto-play remote audio — tap the page or check browser permissions."
+          );
+        });
+      };
+
+      const onRemoteTrackUnsubscribed = (track: RemoteTrack) => {
+        track.detach();
+      };
+
+      room
+        .on(RoomEvent.TrackSubscribed, onRemoteTrackSubscribed)
+        .on(RoomEvent.TrackUnsubscribed, onRemoteTrackUnsubscribed);
+
       await room.connect(url, token);
       await room.localParticipant.setMicrophoneEnabled(micOn);
+      await room.startAudio().catch(() => {
+        pushLine(
+          "status",
+          "Allow audio playback in the browser to hear other participants."
+        );
+      });
       roomRef.current = room;
       setStatus("connected");
       pushLine("status", "Joined voice room");
@@ -196,7 +248,9 @@ export function BoardCallBar({
   if (!canEdit) return null;
 
   return (
-    <div className="absolute bottom-4 right-4 z-50 flex max-w-sm flex-col gap-2 rounded-xl border border-border bg-background/95 p-3 text-sm shadow-lg backdrop-blur-sm">
+    <>
+      <div ref={remoteAudioContainerRef} className="sr-only" aria-hidden />
+      <div className="absolute bottom-4 right-4 z-50 flex max-w-sm flex-col gap-2 rounded-xl border border-border bg-background/95 p-3 text-sm shadow-lg backdrop-blur-sm">
       <div className="flex items-center justify-between gap-2">
         <span className="font-medium text-foreground">Board call</span>
         {status === "connected" ? (
@@ -308,6 +362,7 @@ export function BoardCallBar({
           ))}
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 }
