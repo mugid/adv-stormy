@@ -62,9 +62,6 @@ export default function DashboardPage() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-3">
             <h1 className="text-xl font-semibold tracking-tight">Stormy</h1>
-            <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary">
-              AI Canvas
-            </span>
           </div>
           <div className="flex items-center gap-4">
             <CreateBoardDialog />

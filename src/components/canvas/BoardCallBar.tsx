@@ -427,30 +427,30 @@ export function BoardCallBar({
               )}
               {micOn ? "Mic on" : "Mic off"}
             </Button>
-            <label className="flex cursor-pointer items-center gap-1.5 text-xs">
-              <input
-                type="checkbox"
-                checked={aiListen}
-                onChange={(e) => setAiListen(e.target.checked)}
-                className="rounded border-border"
-              />
+            <Button
+              type="button"
+              size="sm"
+              variant={aiListen ? "secondary" : "outline"}
+              className="gap-1"
+              onClick={() => setAiListen((v) => !v)}
+            >
               <Bot className="h-3.5 w-3.5" />
-              AI listens
-            </label>
-            <label className="flex cursor-pointer items-center gap-1.5 text-xs">
-              <input
-                type="checkbox"
-                checked={voiceReply}
-                onChange={(e) => setVoiceReply(e.target.checked)}
-                className="rounded border-border"
-              />
+              {aiListen ? "AI on" : "AI off"}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={voiceReply ? "secondary" : "outline"}
+              className="gap-1"
+              onClick={() => setVoiceReply((v) => !v)}
+            >
               {voiceReply ? (
                 <Volume2 className="h-3.5 w-3.5" />
               ) : (
                 <VolumeX className="h-3.5 w-3.5" />
               )}
-              Voice reply
-            </label>
+              {voiceReply ? "Voice reply" : "Reply off"}
+            </Button>
           </div>
           {!sttSupported ? (
             <p className="text-xs text-amber-600 dark:text-amber-400">
@@ -458,7 +458,7 @@ export function BoardCallBar({
             </p>
           ) : null}
           {aiListen && micOn ? (
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-[11px] text-muted-foreground wrap-break-word">
               Speak clearly. Final phrases are sent to Stormy when you pause.
             </p>
           ) : null}

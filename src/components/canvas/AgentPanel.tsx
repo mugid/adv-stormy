@@ -105,7 +105,7 @@ export function AgentPanel({
         : "Describe motion / camera for the video…";
 
   return (
-    <div className="absolute bottom-20 left-1/2 z-50 flex w-full max-w-lg -translate-x-1/2 flex-col gap-2">
+    <div className="absolute bottom-4 left-1/2 z-50 flex w-full max-w-lg -translate-x-1/2 flex-col gap-2">
       {expanded && messages.length > 0 && (
         <div className="mx-4 flex max-h-64 flex-col gap-1.5 overflow-y-auto rounded-xl border border-border bg-background/95 p-3 shadow-lg backdrop-blur-sm">
           {messages.map((msg, i) => (
