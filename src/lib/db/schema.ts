@@ -5,6 +5,9 @@ import {
   boolean,
   customType,
   jsonb,
+  integer,
+  uniqueIndex,
+  index,
 } from "drizzle-orm/pg-core";
 import { nanoid } from "nanoid";
 
@@ -100,6 +103,62 @@ export const boardMembers = pgTable("board_members", {
     .notNull()
     .default("editor"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+/** Voice / agent observability and idempotency for board calls */
+export const boardCallEvents = pgTable(
+  "board_call_events",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => nanoid()),
+    boardId: text("board_id")
+      .notNull()
+      .references(() => boards.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown> | null>(),
+    latencyMs: integer("latency_ms"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("board_call_events_board_id_idx").on(t.boardId)]
+);
+
+/** Prevents duplicate processing of the same voice utterance (nonce per final STT phrase). */
+export const boardVoiceTurnDedup = pgTable(
+  "board_voice_turn_dedup",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => nanoid()),
+    boardId: text("board_id")
+      .notNull()
+      .references(() => boards.id, { onDelete: "cascade" }),
+    turnNonce: text("turn_nonce").notNull(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("board_voice_turn_dedup_board_nonce_uidx").on(
+      t.boardId,
+      t.turnNonce
+    ),
+  ]
+);
+
+/** At most one in-flight agent stream per board (voice + text when boardId is sent). */
+export const boardAgentInflight = pgTable("board_agent_inflight", {
+  boardId: text("board_id")
+    .primaryKey()
+    .references(() => boards.id, { onDelete: "cascade" }),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  startedAt: timestamp("started_at").notNull().defaultNow(),
 });
 
 export const mediaGenerationJobs = pgTable("media_generation_jobs", {

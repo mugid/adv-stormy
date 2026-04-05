@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import {
   Excalidraw,
   sceneCoordsToViewportCoords,
@@ -10,6 +10,7 @@ import {
 import "@excalidraw/excalidraw/index.css";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import type { ImportedDataState } from "@excalidraw/excalidraw/data/types";
+import { BoardCallBar } from "./BoardCallBar";
 import { AgentPanel, type CanvasInputMode, type AgentMessage } from "./AgentPanel";
 import { BoardInviteDialog } from "./BoardInviteDialog";
 import { AgentCursor } from "./AgentCursor";
@@ -82,7 +83,20 @@ export function Board({ boardId }: BoardProps) {
   const [boardRole, setBoardRole] = useState<
     "owner" | "editor" | "viewer" | null
   >(null);
-  const agent = useCanvasAgent(api);
+  const agent = useCanvasAgent(api, { boardId });
+
+  const lastAssistantVoiceText = useMemo(() => {
+    const m = [...agent.messages].reverse().find((x) => x.role === "agent");
+    const t = m?.content?.trim();
+    return t && t.length > 0 ? m!.content : null;
+  }, [agent.messages]);
+
+  const handleVoiceAgentPrompt = useCallback(
+    (text: string) => {
+      void agent.prompt(text, { voiceTurnNonce: crypto.randomUUID() });
+    },
+    [agent]
+  );
 
   const collabApi =
     boot.status === "ready" ? api : null;
@@ -675,6 +689,15 @@ export function Board({ boardId }: BoardProps) {
           onPointerUpdate={yjs.handlePointerUpdate}
         />
       </div>
+      {boot.status === "ready" && (
+        <BoardCallBar
+          boardId={boardId}
+          canEdit={canEdit}
+          agentBusy={agent.isThinking}
+          onVoicePrompt={handleVoiceAgentPrompt}
+          lastAssistantText={lastAssistantVoiceText}
+        />
+      )}
       {api && (
         <>
           <AgentCursor

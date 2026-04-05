@@ -1,10 +1,16 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { NextResponse } from "next/server";
 import { headers } from "next/headers";
+import { nanoid } from "nanoid";
+import { and, eq } from "drizzle-orm";
 import { auth } from "@/lib/auth";
 import { BRAINSTORM_AGENT_SYSTEM_PROMPT } from "@/lib/agent/system-prompt";
 import { AGENT_TOOLS } from "@/lib/agent/tool-schemas";
 import type { CanvasContext, AgentAction, AgentStreamEvent } from "@/lib/agent/types";
+import { db } from "@/lib/db";
+import { boardAgentInflight, boardVoiceTurnDedup } from "@/lib/db/schema";
+import { getBoardAccess } from "@/lib/boards/access";
+import { logBoardCallEvent } from "@/lib/call/board-call-events";
 import {
   getDefaultImageModel,
   getDefaultVideoModel,
@@ -20,6 +26,11 @@ interface AgentRequest {
   message: string;
   context: CanvasContext;
   history: Array<{ role: "user" | "assistant"; content: string }>;
+  /** When set, enforces editor access + single-flight lock per board */
+  boardId?: string;
+  /** Idempotent voice utterance id (per final STT phrase) */
+  voiceTurnNonce?: string;
+  inputSource?: "voice" | "text";
 }
 
 export async function POST(request: Request) {
@@ -31,7 +42,72 @@ export async function POST(request: Request) {
   }
 
   const body: AgentRequest = await request.json();
-  const { message, context, history } = body;
+  const { message, context, history, boardId, voiceTurnNonce, inputSource } =
+    body;
+
+  if (voiceTurnNonce && !boardId) {
+    return NextResponse.json(
+      { error: "boardId is required for voice turns" },
+      { status: 400 }
+    );
+  }
+
+  let voiceDedupInserted = false;
+  if (boardId) {
+    const access = await getBoardAccess(boardId, session.user.id);
+    if (!access) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    if (!access.canEdit) {
+      return NextResponse.json(
+        { error: "You need edit access to run the agent" },
+        { status: 403 }
+      );
+    }
+
+    if (voiceTurnNonce) {
+      const deduped = await db
+        .insert(boardVoiceTurnDedup)
+        .values({
+          boardId,
+          turnNonce: voiceTurnNonce,
+          userId: session.user.id,
+        })
+        .onConflictDoNothing({
+          target: [boardVoiceTurnDedup.boardId, boardVoiceTurnDedup.turnNonce],
+        })
+        .returning({ id: boardVoiceTurnDedup.id });
+      if (deduped.length === 0) {
+        return NextResponse.json(
+          { error: "Duplicate voice turn" },
+          { status: 409 }
+        );
+      }
+      voiceDedupInserted = true;
+    }
+
+    try {
+      await db.insert(boardAgentInflight).values({
+        boardId,
+        userId: session.user.id,
+      });
+    } catch {
+      if (voiceDedupInserted) {
+        await db
+          .delete(boardVoiceTurnDedup)
+          .where(
+            and(
+              eq(boardVoiceTurnDedup.boardId, boardId),
+              eq(boardVoiceTurnDedup.turnNonce, voiceTurnNonce!)
+            )
+          );
+      }
+      return NextResponse.json(
+        { error: "Another agent request is in progress for this board" },
+        { status: 409 }
+      );
+    }
+  }
 
   const canvasDescription = buildCanvasDescription(context);
 
@@ -65,6 +141,7 @@ export async function POST(request: Request) {
   messages.push({ role: "user", content: userContent });
 
   const encoder = new TextEncoder();
+  const userId = session.user.id;
   const stream = new ReadableStream({
     async start(controller) {
       function send(event: AgentStreamEvent) {
@@ -73,7 +150,24 @@ export async function POST(request: Request) {
         );
       }
 
+      const correlationId = nanoid();
+      const t0 = Date.now();
+      let agentError: string | null = null;
+
       try {
+        if (boardId) {
+          await logBoardCallEvent({
+            boardId,
+            userId,
+            kind: "agent_request_start",
+            payload: {
+              correlationId,
+              inputSource: inputSource ?? "text",
+              hasVoiceNonce: Boolean(voiceTurnNonce),
+            },
+          });
+        }
+
         let currentMessages = [...messages];
         let continueLoop = true;
 
@@ -246,11 +340,31 @@ export async function POST(request: Request) {
 
         send({ type: "done" });
       } catch (err) {
+        agentError = err instanceof Error ? err.message : "Unknown error";
         send({
           type: "error",
-          content: err instanceof Error ? err.message : "Unknown error",
+          content: agentError,
         });
       } finally {
+        if (boardId) {
+          try {
+            await db
+              .delete(boardAgentInflight)
+              .where(eq(boardAgentInflight.boardId, boardId));
+          } catch (e) {
+            console.error("[agent] failed to release inflight lock", e);
+          }
+          await logBoardCallEvent({
+            boardId,
+            userId,
+            kind: agentError ? "agent_request_error" : "agent_request_complete",
+            payload: {
+              correlationId,
+              ...(agentError ? { error: agentError } : {}),
+            },
+            latencyMs: Date.now() - t0,
+          });
+        }
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
       }

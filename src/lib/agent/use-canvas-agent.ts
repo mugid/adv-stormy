@@ -16,7 +16,16 @@ interface ConversationMessage {
   content: string;
 }
 
-export function useCanvasAgent(api: ExcalidrawImperativeAPI | null) {
+export type CanvasAgentPromptOptions = {
+  voiceTurnNonce?: string;
+  inputSource?: "voice" | "text";
+};
+
+export function useCanvasAgent(
+  api: ExcalidrawImperativeAPI | null,
+  options?: { boardId?: string }
+) {
+  const boardId = options?.boardId;
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
   const [isThinking, setIsThinking] = useState(false);
@@ -28,7 +37,10 @@ export function useCanvasAgent(api: ExcalidrawImperativeAPI | null) {
   const historyRef = useRef<ConversationMessage[]>([]);
 
   const prompt = useCallback(
-    async (userMessage: string) => {
+    async (
+      userMessage: string,
+      promptOpts?: CanvasAgentPromptOptions
+    ) => {
       if (!api || isThinking) return;
 
       setMessages((prev) => [
@@ -43,6 +55,10 @@ export function useCanvasAgent(api: ExcalidrawImperativeAPI | null) {
       const controller = new AbortController();
       abortRef.current = controller;
 
+      const inputSource = promptOpts?.voiceTurnNonce
+        ? ("voice" as const)
+        : (promptOpts?.inputSource ?? "text");
+
       try {
         const context = await extractCanvasContext(api);
 
@@ -53,12 +69,32 @@ export function useCanvasAgent(api: ExcalidrawImperativeAPI | null) {
             message: userMessage,
             context,
             history: historyRef.current.slice(-20),
+            ...(boardId
+              ? {
+                  boardId,
+                  inputSource,
+                  ...(promptOpts?.voiceTurnNonce
+                    ? { voiceTurnNonce: promptOpts.voiceTurnNonce }
+                    : {}),
+                }
+              : {}),
           }),
           signal: controller.signal,
         });
 
         if (!response.ok) {
-          throw new Error(`Agent request failed: ${response.status}`);
+          let detail = `${response.status}`;
+          try {
+            const errBody = (await response.json()) as { error?: string };
+            if (errBody?.error) detail = errBody.error;
+          } catch {
+            /* ignore */
+          }
+          throw new Error(
+            response.status === 409
+              ? detail
+              : `Agent request failed: ${detail}`
+          );
         }
 
         const reader = response.body?.getReader();
@@ -121,7 +157,7 @@ export function useCanvasAgent(api: ExcalidrawImperativeAPI | null) {
         abortRef.current = null;
       }
     },
-    [api, isThinking]
+    [api, isThinking, boardId]
   );
 
   const cancel = useCallback(() => {
